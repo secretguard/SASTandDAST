@@ -1,0 +1,478 @@
+#!/bin/bash
+###############################################################################
+# VM-02: DAST Attack Node — OWASP ZAP + Nessus Essentials
+# Master Kit Setup Script
+# OS: Ubuntu 22.04 LTS | CPU: 4 vCPU | RAM: 8 GB | Disk: 80 GB SSD
+#
+# This script installs and configures:
+#   - OpenJDK 17
+#   - OWASP ZAP (latest stable)
+#   - Nessus Essentials
+#   - Supplementary tools (nmap, curl, python3, etc.)
+#   - Lab user with SSH access
+#
+# Run as root: sudo bash vm02-zap-nessus-setup.sh
+###############################################################################
+
+set -euo pipefail
+
+# ─── CONFIGURATION ───────────────────────────────────────────────────────────
+LAB_USER="${LAB_USER:-$(logname 2>/dev/null || echo "labuser")}"
+LAB_HOME="${LAB_HOME:-/home/$LAB_USER}"
+THIS_IP="${THIS_IP:-$(hostname -I | awk '{print $1}')}"
+VM01_IP="${VM01_IP:-}"
+VM02_IP="${VM02_IP:-$THIS_IP}"
+VM03_IP="${VM03_IP:-}"
+ZAP_API_KEY="lab-api-key-2024"
+
+LOG_FILE="/var/log/vm02-setup.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "======================================================================"
+echo " VM-02 SETUP — DAST Attack Node (ZAP + Nessus)"
+echo " Started: $(date)"
+echo "======================================================================"
+
+# ─── STEP 1: SYSTEM PREP ────────────────────────────────────────────────────
+echo ""
+echo "[STEP 1/10] System update and base packages..."
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -qq
+apt-get upgrade -y -qq
+apt-get install -y -qq \
+  curl wget unzip git net-tools vim nano htop tree jq \
+  software-properties-common apt-transport-https ca-certificates \
+  gnupg lsb-release ufw openssh-server \
+  python3 python3-pip python3-venv \
+  nmap nikto dnsutils whois traceroute \
+  firefox xdg-utils
+
+# ─── STEP 2: CREATE LAB USER ────────────────────────────────────────────────
+echo ""
+echo "[STEP 2/10] Verifying lab user: $LAB_USER..."
+
+if ! id "$LAB_USER" &>/dev/null; then
+  useradd -m -s /bin/bash -G sudo "$LAB_USER"
+  echo "  Created user $LAB_USER. Set a password with: sudo passwd $LAB_USER"
+fi
+if [ ! -f "/etc/sudoers.d/$LAB_USER" ]; then
+  echo "$LAB_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$LAB_USER"
+  chmod 440 "/etc/sudoers.d/$LAB_USER"
+fi
+echo "  Lab user: $LAB_USER (home: $LAB_HOME)"
+
+# ─── STEP 3: SSH CONFIGURATION ──────────────────────────────────────────────
+echo ""
+echo "[STEP 3/10] Configuring SSH..."
+
+sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+systemctl enable ssh
+systemctl restart ssh
+
+# ─── STEP 4: INSTALL JAVA 17 ────────────────────────────────────────────────
+echo ""
+echo "[STEP 4/10] Installing OpenJDK 17..."
+
+apt-get install -y -qq openjdk-17-jdk openjdk-17-jre
+java -version 2>&1 | head -1
+
+# ─── STEP 5: INSTALL OWASP ZAP ──────────────────────────────────────────────
+echo ""
+echo "[STEP 5/10] Installing OWASP ZAP..."
+
+# Download latest stable ZAP Linux installer
+# Using the cross-platform zip for daemon/headless use
+ZAP_DL_URL="https://github.com/zaproxy/zaproxy/releases/download/v2.16.1/ZAP_2.16.1_Linux.tar.gz"
+
+cd /tmp
+echo "  Downloading OWASP ZAP..."
+wget -q "$ZAP_DL_URL" -O zap-linux.tar.gz || {
+  echo "  Direct download failed, trying latest release page..."
+  # Fallback: get latest release URL
+  ZAP_DL_URL=$(curl -s https://api.github.com/repos/zaproxy/zaproxy/releases/latest | jq -r '.assets[] | select(.name | contains("Linux") and contains("tar.gz")) | .browser_download_url' | head -1)
+  wget -q "$ZAP_DL_URL" -O zap-linux.tar.gz
+}
+
+# Extract
+tar -xzf zap-linux.tar.gz -C /opt/
+# The extracted folder name varies; find it
+ZAP_DIR=$(find /opt -maxdepth 1 -name "ZAP_*" -type d | head -1)
+if [ -z "$ZAP_DIR" ]; then
+  echo "  ERROR: Could not find extracted ZAP directory."
+  exit 1
+fi
+
+rm -rf /opt/zaproxy
+mv "$ZAP_DIR" /opt/zaproxy
+
+# Make zap.sh executable and create symlink
+chmod +x /opt/zaproxy/zap.sh
+ln -sf /opt/zaproxy/zap.sh /usr/local/bin/zap
+
+echo "  ZAP installed at /opt/zaproxy"
+
+# ─── STEP 6: CONFIGURE ZAP FOR DAEMON MODE ──────────────────────────────────
+echo ""
+echo "[STEP 6/10] Configuring ZAP daemon service..."
+
+# Create ZAP data directory
+mkdir -p "$LAB_HOME/.ZAP/policies"
+chown -R "$LAB_USER:$LAB_USER" "$LAB_HOME/.ZAP"
+
+# Create systemd service for ZAP daemon
+cat > /etc/systemd/system/zap-daemon.service << EOF
+[Unit]
+Description=OWASP ZAP Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=$LAB_USER
+ExecStart=/opt/zaproxy/zap.sh -daemon -port 8090 -host 0.0.0.0 \
+  -config api.key=$ZAP_API_KEY \
+  -config api.addrs.addr.name=.* \
+  -config api.addrs.addr.regex=true \
+  -config api.disablekey=false \
+  -config connection.timeoutInSecs=120
+Restart=on-failure
+RestartSec=15
+StandardOutput=append:/var/log/zap-daemon.log
+StandardError=append:/var/log/zap-daemon.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+touch /var/log/zap-daemon.log
+chown "$LAB_USER:$LAB_USER" /var/log/zap-daemon.log
+
+systemctl daemon-reload
+systemctl enable zap-daemon
+
+echo "  ZAP daemon service configured (port 8090, API key: $ZAP_API_KEY)"
+
+# ─── STEP 7: INSTALL NESSUS ESSENTIALS ───────────────────────────────────────
+echo ""
+echo "[STEP 7/10] Installing Nessus Essentials..."
+
+cd /tmp
+
+# Download Nessus Essentials .deb
+# Note: Tenable changes download URLs; this gets the latest
+echo "  Downloading Nessus Essentials..."
+NESSUS_DEB="Nessus-10.8.3-ubuntu1604_amd64.deb"
+NESSUS_URL="https://www.tenable.com/downloads/api/v2/pages/nessus/files/${NESSUS_DEB}"
+
+# Try download; if it fails (URL changes often), provide manual instructions
+if wget -q "$NESSUS_URL" -O nessus.deb 2>/dev/null; then
+  echo "  Downloaded Nessus .deb package."
+else
+  echo ""
+  echo "  ╔═══════════════════════════════════════════════════════════════════╗"
+  echo "  ║ MANUAL STEP REQUIRED: Nessus download URL has changed.          ║"
+  echo "  ║                                                                   ║"
+  echo "  ║ 1. Go to: https://www.tenable.com/downloads/nessus               ║"
+  echo "  ║ 2. Select: Nessus Essentials                                      ║"
+  echo "  ║ 3. Download the Ubuntu (amd64) .deb package                       ║"
+  echo "  ║ 4. Transfer it to this VM as /tmp/nessus.deb                      ║"
+  echo "  ║ 5. Run: sudo dpkg -i /tmp/nessus.deb                             ║"
+  echo "  ║ 6. Run: sudo systemctl enable nessusd && sudo systemctl start nessusd ║"
+  echo "  ╚═══════════════════════════════════════════════════════════════════╝"
+  echo ""
+  # Create a placeholder script for manual installation
+  cat > "$LAB_HOME/scripts/install-nessus-manual.sh" << 'NSCRIPT'
+#!/bin/bash
+# Run this after downloading the Nessus .deb to /tmp/nessus.deb
+if [ ! -f /tmp/nessus.deb ]; then
+  echo "Error: Place the Nessus .deb file at /tmp/nessus.deb first."
+  echo "Download from: https://www.tenable.com/downloads/nessus"
+  exit 1
+fi
+sudo dpkg -i /tmp/nessus.deb
+sudo systemctl enable nessusd
+sudo systemctl start nessusd
+echo ""
+echo "Nessus installed! Access at: https://$(hostname -I | awk '{print $1}'):8834"
+echo "Complete setup in the browser (select Nessus Essentials, enter activation code)."
+NSCRIPT
+  chmod +x "$LAB_HOME/scripts/install-nessus-manual.sh" 2>/dev/null || true
+fi
+
+# Install if .deb exists
+if [ -f /tmp/nessus.deb ]; then
+  dpkg -i /tmp/nessus.deb || apt-get install -f -y
+  systemctl enable nessusd
+  echo "  Nessus installed. It will be configured via the web UI on first access."
+fi
+
+# ─── STEP 8: INSTALL SUPPLEMENTARY TOOLS ─────────────────────────────────────
+echo ""
+echo "[STEP 8/10] Installing supplementary security tools..."
+
+# Python tools
+pip3 install --break-system-packages requests beautifulsoup4 2>/dev/null || \
+  pip3 install requests beautifulsoup4 2>/dev/null || true
+
+# Install sqlmap
+if [ ! -d /opt/sqlmap ]; then
+  git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap 2>/dev/null || echo "  sqlmap clone failed (network?), skipping."
+  ln -sf /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap 2>/dev/null || true
+fi
+
+echo "  Supplementary tools installed: nmap, nikto, sqlmap, python3"
+
+# ─── STEP 9: FIREWALL & NETWORK ─────────────────────────────────────────────
+echo ""
+echo "[STEP 9/10] Configuring firewall..."
+
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow ssh
+ufw allow 8080/tcp comment "ZAP Proxy (alternate)"
+ufw allow 8090/tcp comment "ZAP Daemon API"
+ufw allow 8834/tcp comment "Nessus Web UI"
+ufw --force enable
+
+echo "  Firewall configured: SSH + TCP 8080, 8090, 8834"
+
+# ─── STEP 10: HOSTS FILE & HELPER SCRIPTS ───────────────────────────────────
+echo ""
+echo "[STEP 10/10] Configuring hosts file and helper scripts..."
+
+add_hosts_entry() {
+  local IP="$1"; local ALIASES="$2"
+  [ -n "$IP" ] && ! grep -q "$IP" /etc/hosts && echo "$IP   $ALIASES" >> /etc/hosts
+}
+echo "" >> /etc/hosts
+echo "# AppSec Lab Environment" >> /etc/hosts
+add_hosts_entry "$VM01_IP" "vm01 sonarqube-server"
+add_hosts_entry "$VM02_IP" "vm02 zap-server nessus-server"
+add_hosts_entry "$VM03_IP" "vm03 target-server"
+
+# Create helper scripts directory
+mkdir -p "$LAB_HOME/scripts"
+
+# Status check script — unquoted heredoc so $VM01_IP/$VM03_IP expand at write-time
+cat > "$LAB_HOME/scripts/check-status.sh" << SCRIPT
+#!/bin/bash
+echo "=== VM-02 Service Status ==="
+echo ""
+echo "--- OWASP ZAP Daemon ---"
+if systemctl is-active zap-daemon &>/dev/null; then
+  echo "Status: RUNNING"
+  ZAP_VER=\$(curl -sf 'http://localhost:8090/JSON/core/view/version/?apikey=${ZAP_API_KEY}' 2>/dev/null | jq -r '.version' 2>/dev/null || echo "unknown")
+  echo "Version: \$ZAP_VER"
+  echo "API: http://localhost:8090"
+else
+  echo "Status: STOPPED"
+  echo "Start with: sudo systemctl start zap-daemon"
+fi
+echo ""
+echo "--- Nessus ---"
+if systemctl is-active nessusd &>/dev/null; then
+  echo "Status: RUNNING"
+  echo "Web UI: https://\$(hostname -I | awk '{print \$1}'):8834"
+else
+  echo "Status: STOPPED (or not installed)"
+  echo "Start with: sudo systemctl start nessusd"
+fi
+echo ""
+echo "--- Connectivity to Lab VMs ---"
+VM01="${VM01_IP}"
+VM03="${VM03_IP}"
+if [ -n "\$VM01" ]; then
+  ping -c 1 -W 2 "\$VM01" > /dev/null 2>&1 && echo "[OK] SonarQube (\$VM01)" || echo "[FAIL] SonarQube (\$VM01)"
+else
+  echo "[SKIP] SonarQube VM IP not configured"
+fi
+if [ -n "\$VM03" ]; then
+  ping -c 1 -W 2 "\$VM03" > /dev/null 2>&1 && echo "[OK] Target (\$VM03)" || echo "[FAIL] Target (\$VM03)"
+else
+  echo "[SKIP] Target VM IP not configured"
+fi
+echo ""
+echo "--- Disk / Memory ---"
+df -h / | tail -1 | awk '{print "Disk: " \$3 " / " \$2 " (" \$5 ")"}'
+free -h | grep Mem | awk '{print "RAM:  " \$3 " / " \$2}'
+SCRIPT
+
+# ZAP scan wrapper script
+cat > "$LAB_HOME/scripts/zap-scan.sh" << 'SCRIPT'
+#!/bin/bash
+# Usage: ./zap-scan.sh <target-url> [scan-type]
+# scan-type: passive (default), active, spider
+TARGET=${1:?"Usage: $0 <target-url> [passive|active|spider]"}
+SCAN_TYPE=${2:-"passive"}
+API_KEY="lab-api-key-2024"
+ZAP_URL="http://localhost:8090"
+
+echo "=== ZAP Scan: $SCAN_TYPE ==="
+echo "Target: $TARGET"
+echo ""
+
+case $SCAN_TYPE in
+  spider)
+    echo "Starting spider..."
+    SCAN_ID=$(curl -sf "$ZAP_URL/JSON/spider/action/scan/?apikey=$API_KEY&url=$TARGET&recurse=true" | jq -r '.scan')
+    echo "Spider ID: $SCAN_ID"
+    while true; do
+      PROGRESS=$(curl -sf "$ZAP_URL/JSON/spider/view/status/?apikey=$API_KEY&scanId=$SCAN_ID" | jq -r '.status')
+      echo "  Progress: $PROGRESS%"
+      [ "$PROGRESS" = "100" ] && break
+      sleep 5
+    done
+    echo "Spider complete!"
+    ;;
+  active)
+    echo "WARNING: Active scan sends attack payloads to the target."
+    echo "Ensure you have authorization to scan: $TARGET"
+    echo ""
+    echo "Starting spider first..."
+    SPIDER_ID=$(curl -sf "$ZAP_URL/JSON/spider/action/scan/?apikey=$API_KEY&url=$TARGET&recurse=true" | jq -r '.scan')
+    while true; do
+      PROGRESS=$(curl -sf "$ZAP_URL/JSON/spider/view/status/?apikey=$API_KEY&scanId=$SPIDER_ID" | jq -r '.status')
+      [ "$PROGRESS" = "100" ] && break
+      sleep 5
+    done
+    echo "Spider complete. Starting active scan..."
+    SCAN_ID=$(curl -sf "$ZAP_URL/JSON/ascan/action/scan/?apikey=$API_KEY&url=$TARGET&recurse=true" | jq -r '.scan')
+    echo "Active Scan ID: $SCAN_ID"
+    while true; do
+      PROGRESS=$(curl -sf "$ZAP_URL/JSON/ascan/view/status/?apikey=$API_KEY&scanId=$SCAN_ID" | jq -r '.status')
+      echo "  Progress: $PROGRESS%"
+      [ "$PROGRESS" = "100" ] && break
+      sleep 10
+    done
+    echo "Active scan complete!"
+    ;;
+  passive|*)
+    echo "Accessing URL for passive analysis..."
+    curl -sf "$ZAP_URL/JSON/core/action/accessUrl/?apikey=$API_KEY&url=$TARGET" > /dev/null
+    sleep 3
+    echo "Passive scan queued."
+    ;;
+esac
+
+echo ""
+echo "--- Alerts Summary ---"
+curl -sf "$ZAP_URL/JSON/alert/view/alertsSummary/?apikey=$API_KEY&baseurl=$TARGET" | jq '.'
+echo ""
+echo "Full report: curl -o report.html '$ZAP_URL/OTHER/core/other/htmlreport/?apikey=$API_KEY'"
+SCRIPT
+
+# ZAP export root CA script
+cat > "$LAB_HOME/scripts/zap-export-ca.sh" << SCRIPT
+#!/bin/bash
+API_KEY="lab-api-key-2024"
+OUTPUT="\${1:-$LAB_HOME/zap-root-ca.cer}"
+echo "Exporting ZAP Root CA certificate to \$OUTPUT..."
+curl -sf "http://localhost:8090/OTHER/core/other/rootcert/?apikey=\$API_KEY" -o "\$OUTPUT"
+if [ -f "\$OUTPUT" ]; then
+  echo "Certificate exported: \$OUTPUT"
+  echo ""
+  echo "To trust in Firefox:"
+  echo "  Settings > Privacy & Security > View Certificates > Import > Select \$OUTPUT"
+  echo "  Check: 'Trust this CA to identify websites'"
+else
+  echo "Failed to export. Is ZAP daemon running?"
+fi
+SCRIPT
+
+# Nessus scan checker script
+cat > "$LAB_HOME/scripts/nessus-check.sh" << 'SCRIPT'
+#!/bin/bash
+echo "=== Nessus Essentials Status ==="
+if systemctl is-active nessusd &>/dev/null; then
+  echo "Service: RUNNING"
+  echo "Web UI:  https://$(hostname -I | awk '{print $1}'):8834"
+  echo ""
+  echo "If this is first access, you will need to:"
+  echo "  1. Accept the self-signed certificate in browser"
+  echo "  2. Select 'Nessus Essentials'"
+  echo "  3. Enter activation code from https://www.tenable.com/products/nessus/nessus-essentials"
+  echo "  4. Create admin user"
+  echo "  5. Wait for plugin download (~10-15 min)"
+else
+  echo "Service: STOPPED"
+  echo "Start: sudo systemctl start nessusd"
+fi
+SCRIPT
+
+chmod +x "$LAB_HOME/scripts/"*.sh
+chown -R "$LAB_USER:$LAB_USER" "$LAB_HOME/scripts"
+
+# ─── MOTD / WELCOME MESSAGE ─────────────────────────────────────────────────
+cat > /etc/motd << 'EOF'
+
+ ╔══════════════════════════════════════════════════════════════╗
+ ║  VM-02: DAST Attack Node — ZAP + Nessus                     ║
+ ║  Application Security Testing — SAST & DAST Lab             ║
+ ║  Sarath G | www.sarathg.me                                  ║
+ ╠══════════════════════════════════════════════════════════════╣
+ ║                                                              ║
+ ║  OWASP ZAP:  Daemon on port 8090                            ║
+ ║              API Key: lab-api-key-2024                       ║
+ ║  Nessus:     https://<this-ip>:8834                         ║
+ ║                                                              ║
+ ║  Helper scripts:  ~/scripts/check-status.sh                 ║
+ ║                   ~/scripts/zap-scan.sh <url> [type]        ║
+ ║                   ~/scripts/zap-export-ca.sh                ║
+ ║                   ~/scripts/nessus-check.sh                 ║
+ ║                                                              ║
+ ║  Targets:    http://<vm03-ip>/dvwa/                      ║
+ ║              http://<vm03-ip>:8080 (VulnShop)            ║
+ ║                                                              ║
+ ╚══════════════════════════════════════════════════════════════╝
+
+EOF
+
+# ─── START SERVICES ──────────────────────────────────────────────────────────
+echo ""
+echo "Starting ZAP daemon..."
+systemctl start zap-daemon
+
+echo "Waiting for ZAP to initialize..."
+for i in $(seq 1 30); do
+  if curl -sf "http://localhost:8090/JSON/core/view/version/?apikey=$ZAP_API_KEY" &>/dev/null; then
+    ZAP_VER=$(curl -sf "http://localhost:8090/JSON/core/view/version/?apikey=$ZAP_API_KEY" | jq -r '.version')
+    echo "  ZAP is UP! Version: $ZAP_VER"
+    break
+  fi
+  echo "  [$i/30] Waiting..."
+  sleep 5
+done
+
+if systemctl is-active nessusd &>/dev/null; then
+  echo "Nessus is running."
+else
+  echo "Nessus: Not started (may need manual installation — see ~/scripts/install-nessus-manual.sh)"
+fi
+
+# ─── CLEANUP ─────────────────────────────────────────────────────────────────
+echo ""
+echo "Cleaning up..."
+rm -f /tmp/zap-linux.tar.gz /tmp/nessus.deb
+apt-get autoremove -y -qq
+apt-get clean
+
+# ─── SUMMARY ─────────────────────────────────────────────────────────────────
+echo ""
+echo "======================================================================"
+echo " VM-02 SETUP COMPLETE"
+echo "======================================================================"
+echo ""
+echo " OWASP ZAP Daemon:   http://$THIS_IP:8090 (API key: $ZAP_API_KEY)"
+echo " Nessus Essentials:  https://$THIS_IP:8834"
+echo " Lab User:           $LAB_USER (home: $LAB_HOME)"
+echo " Helper Scripts:     $LAB_HOME/scripts/"
+echo " Log File:           $LOG_FILE"
+echo ""
+echo " IMPORTANT:"
+echo "   - Nessus requires browser-based first-time setup"
+echo "   - Get activation code: https://www.tenable.com/products/nessus/nessus-essentials"
+echo ""
+echo " Completed: $(date)"
+echo "======================================================================"
