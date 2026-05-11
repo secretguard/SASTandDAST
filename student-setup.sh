@@ -36,7 +36,7 @@ preflight_check() {
   fi
 
   # Detect the real user (not root)
-  LAB_USER="${SUDO_USER:-${USER:-}}"
+  LAB_USER="${SUDO_USER:-${USER:-$(logname 2>/dev/null || id -un 2>/dev/null || echo "")}}"
   if [ -z "$LAB_USER" ] || [ "$LAB_USER" = "root" ]; then
     echo -e "${YELLOW}[PROMPT]${NC} Could not auto-detect your username."
     read -r -p "         Enter your username (not root): " LAB_USER
@@ -46,7 +46,7 @@ preflight_check() {
     fi
   fi
 
-  # Resolve home directory
+  # Resolve home directory from passwd database (most reliable)
   LAB_HOME=$(getent passwd "$LAB_USER" 2>/dev/null | cut -d: -f6)
   [ -z "$LAB_HOME" ] && LAB_HOME="/home/$LAB_USER"
 

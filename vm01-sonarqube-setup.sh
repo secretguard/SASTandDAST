@@ -17,8 +17,10 @@
 set -euo pipefail
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
-LAB_USER="${LAB_USER:-$(logname 2>/dev/null || echo "labuser")}"
-LAB_HOME="${LAB_HOME:-/home/$LAB_USER}"
+LAB_USER="${LAB_USER:-${SUDO_USER:-$(logname 2>/dev/null || id -un 2>/dev/null || echo "labuser")}}"
+[ "$LAB_USER" = "root" ] && LAB_USER="${SUDO_USER:-labuser}"
+LAB_HOME=$(getent passwd "$LAB_USER" 2>/dev/null | cut -d: -f6)
+[ -z "$LAB_HOME" ] && LAB_HOME="/home/$LAB_USER"
 THIS_IP="${THIS_IP:-$(hostname -I | awk '{print $1}')}"
 VM01_IP="${VM01_IP:-$THIS_IP}"
 VM02_IP="${VM02_IP:-}"

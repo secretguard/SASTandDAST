@@ -18,8 +18,10 @@
 set -euo pipefail
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
-LAB_USER="${LAB_USER:-$(logname 2>/dev/null || echo "labuser")}"
-LAB_HOME="${LAB_HOME:-/home/$LAB_USER}"
+LAB_USER="${LAB_USER:-${SUDO_USER:-$(logname 2>/dev/null || id -un 2>/dev/null || echo "labuser")}}"
+[ "$LAB_USER" = "root" ] && LAB_USER="${SUDO_USER:-labuser}"
+LAB_HOME=$(getent passwd "$LAB_USER" 2>/dev/null | cut -d: -f6)
+[ -z "$LAB_HOME" ] && LAB_HOME="/home/$LAB_USER"
 THIS_IP="${THIS_IP:-$(hostname -I | awk '{print $1}')}"
 VM01_IP="${VM01_IP:-}"
 VM02_IP="${VM02_IP:-}"
@@ -151,8 +153,12 @@ sed -i "s/\$_DVWA\[ 'db_database' \] *= *'.*'/\$_DVWA[ 'db_database' ] = '$DVWA_
 # Set default security level to LOW for labs
 sed -i "s/\$_DVWA\[ 'default_security_level' \] *= *'.*'/\$_DVWA[ 'default_security_level' ] = 'low'/" config.inc.php
 # Enable allow_url_include for file inclusion labs
-sed -i 's/^allow_url_include = Off/allow_url_include = On/' /etc/php/*/apache2/php.ini 2>/dev/null || true
-sed -i 's/^allow_url_fopen = Off/allow_url_fopen = On/' /etc/php/*/apache2/php.ini 2>/dev/null || true
+# Pattern handles both commented (;allow_url_include) and uncommented forms
+PHP_INI_APACHE=$(find /etc/php -name "php.ini" -path "*/apache2/*" | head -1)
+if [ -n "$PHP_INI_APACHE" ]; then
+  sed -i 's/^[;[:space:]]*allow_url_include[[:space:]]*=.*/allow_url_include = On/' "$PHP_INI_APACHE"
+  sed -i 's/^[;[:space:]]*allow_url_fopen[[:space:]]*=.*/allow_url_fopen = On/' "$PHP_INI_APACHE"
+fi
 
 # Set permissions
 chown -R www-data:www-data /var/www/html/dvwa
@@ -1304,8 +1310,10 @@ Listen 8080
 </VirtualHost>
 VHOST
 
-a2ensite vulnshop.conf
 a2enmod rewrite
+a2ensite vulnshop.conf
+apache2ctl configtest 2>&1 | grep -v "^Syntax OK" || true
+systemctl reload apache2
 
 # ─── STEP 10: CONFIGURE PHP (INTENTIONALLY WEAK) ────────────────────────────
 echo ""
@@ -1314,16 +1322,16 @@ echo "[STEP 10/12] Configuring PHP (intentionally weak settings)..."
 PHP_INI=$(find /etc/php -name "php.ini" -path "*/apache2/*" | head -1)
 if [ -n "$PHP_INI" ]; then
   # VULNERABILITY: Expose PHP version
-  sed -i 's/^expose_php = .*/expose_php = On/' "$PHP_INI"
+  sed -i 's/^[;[:space:]]*expose_php[[:space:]]*=.*/expose_php = On/' "$PHP_INI"
   # VULNERABILITY: Display errors in production
-  sed -i 's/^display_errors = .*/display_errors = On/' "$PHP_INI"
-  sed -i 's/^display_startup_errors = .*/display_startup_errors = On/' "$PHP_INI"
+  sed -i 's/^[;[:space:]]*display_errors[[:space:]]*=.*/display_errors = On/' "$PHP_INI"
+  sed -i 's/^[;[:space:]]*display_startup_errors[[:space:]]*=.*/display_startup_errors = On/' "$PHP_INI"
   # Allow URL file operations (needed for some DVWA labs)
-  sed -i 's/^allow_url_include = .*/allow_url_include = On/' "$PHP_INI"
-  sed -i 's/^allow_url_fopen = .*/allow_url_fopen = On/' "$PHP_INI"
+  sed -i 's/^[;[:space:]]*allow_url_include[[:space:]]*=.*/allow_url_include = On/' "$PHP_INI"
+  sed -i 's/^[;[:space:]]*allow_url_fopen[[:space:]]*=.*/allow_url_fopen = On/' "$PHP_INI"
   # Generous upload limit
-  sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 20M/' "$PHP_INI"
-  sed -i 's/^post_max_size = .*/post_max_size = 25M/' "$PHP_INI"
+  sed -i 's/^[;[:space:]]*upload_max_filesize[[:space:]]*=.*/upload_max_filesize = 20M/' "$PHP_INI"
+  sed -i 's/^[;[:space:]]*post_max_size[[:space:]]*=.*/post_max_size = 25M/' "$PHP_INI"
 fi
 
 echo "  PHP configured with intentionally weak security settings."
@@ -1437,12 +1445,15 @@ EOF
 echo ""
 echo "Restarting Apache..."
 systemctl restart apache2
+sleep 3
 
 # Initialize DVWA database via curl
 echo "Initializing DVWA database..."
-sleep 2
-curl -sf -d "create_db=Create+/+Reset+Database" \
-  "http://localhost/dvwa/setup.php" > /dev/null 2>&1 || echo "  (Visit /dvwa/setup.php manually to initialize DB)"
+curl -s -o /dev/null -X POST \
+  -d "create_db=Create+%2F+Reset+Database" \
+  "http://localhost/dvwa/setup.php" 2>/dev/null \
+  && echo "  DVWA database initialized." \
+  || echo "  DVWA init via curl failed — visit http://<YOUR-IP>/dvwa/setup.php and click 'Create / Reset Database'"
 
 # ─── CLEANUP ─────────────────────────────────────────────────────────────────
 echo ""
