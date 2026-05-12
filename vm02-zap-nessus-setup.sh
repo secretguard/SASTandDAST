@@ -14,7 +14,7 @@
 # Run as root: sudo bash vm02-zap-nessus-setup.sh
 ###############################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
 LAB_USER="${LAB_USER:-${SUDO_USER:-$(logname 2>/dev/null || id -un 2>/dev/null || echo "labuser")}}"
@@ -22,6 +22,8 @@ LAB_USER="${LAB_USER:-${SUDO_USER:-$(logname 2>/dev/null || id -un 2>/dev/null |
 LAB_HOME=$(getent passwd "$LAB_USER" 2>/dev/null | cut -d: -f6)
 [ -z "$LAB_HOME" ] && LAB_HOME="/home/$LAB_USER"
 THIS_IP="${THIS_IP:-$(hostname -I | awk '{print $1}')}"
+# Directory of this script (used to locate Nessus .deb placed alongside it)
+SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 VM01_IP="${VM01_IP:-}"
 VM02_IP="${VM02_IP:-$THIS_IP}"
 VM03_IP="${VM03_IP:-}"
@@ -77,43 +79,53 @@ systemctl restart ssh
 echo ""
 echo "[STEP 4/10] Installing OpenJDK 17..."
 
-apt-get install -y -qq openjdk-17-jdk openjdk-17-jre
-java -version 2>&1 | head -1
+if java -version 2>&1 | grep -q 'version "17'; then
+  echo "  Java 17 already installed: $(java -version 2>&1 | head -1)"
+else
+  apt-get install -y -qq openjdk-17-jdk openjdk-17-jre
+  echo "  Installed: $(java -version 2>&1 | head -1)"
+fi
 
 # ─── STEP 5: INSTALL OWASP ZAP ──────────────────────────────────────────────
 echo ""
 echo "[STEP 5/10] Installing OWASP ZAP..."
 
-# Download latest stable ZAP Linux installer
-# Using the cross-platform zip for daemon/headless use
-ZAP_DL_URL="https://github.com/zaproxy/zaproxy/releases/download/v2.16.1/ZAP_2.16.1_Linux.tar.gz"
+if [ -d /opt/zaproxy ] && [ -f /opt/zaproxy/zap.sh ]; then
+  echo "  ZAP already installed at /opt/zaproxy — skipping download."
+else
+  ZAP_DL_URL="https://github.com/zaproxy/zaproxy/releases/download/v2.16.1/ZAP_2.16.1_Linux.tar.gz"
+  cd /tmp
+  if [ ! -f "zap-linux.tar.gz" ]; then
+    echo "  Downloading OWASP ZAP..."
+    wget -q "$ZAP_DL_URL" -O zap-linux.tar.gz || {
+      echo "  Direct download failed, trying latest release API..."
+      ZAP_DL_URL=$(curl -s https://api.github.com/repos/zaproxy/zaproxy/releases/latest \
+        | jq -r '.assets[] | select(.name | contains("Linux") and contains("tar.gz")) | .browser_download_url' \
+        | head -1)
+      wget -q "$ZAP_DL_URL" -O zap-linux.tar.gz
+    }
+  else
+    echo "  Using cached download: zap-linux.tar.gz"
+  fi
 
-cd /tmp
-echo "  Downloading OWASP ZAP..."
-wget -q "$ZAP_DL_URL" -O zap-linux.tar.gz || {
-  echo "  Direct download failed, trying latest release page..."
-  # Fallback: get latest release URL
-  ZAP_DL_URL=$(curl -s https://api.github.com/repos/zaproxy/zaproxy/releases/latest | jq -r '.assets[] | select(.name | contains("Linux") and contains("tar.gz")) | .browser_download_url' | head -1)
-  wget -q "$ZAP_DL_URL" -O zap-linux.tar.gz
-}
-
-# Extract
-tar -xzf zap-linux.tar.gz -C /opt/
-# The extracted folder name varies; find it
-ZAP_DIR=$(find /opt -maxdepth 1 -name "ZAP_*" -type d | head -1)
-if [ -z "$ZAP_DIR" ]; then
-  echo "  ERROR: Could not find extracted ZAP directory."
-  exit 1
+  tar -xzf zap-linux.tar.gz -C /opt/
+  ZAP_FOUND=$(find /opt -maxdepth 1 -name "ZAP_*" -type d | head -1)
+  if [ -z "$ZAP_FOUND" ]; then
+    echo "  ERROR: Could not find extracted ZAP directory. Download may have failed."
+    echo "  You can retry with: sudo bash vm02-zap-nessus-setup.sh"
+  else
+    rm -rf /opt/zaproxy
+    mv "$ZAP_FOUND" /opt/zaproxy
+    echo "  ZAP extracted to /opt/zaproxy"
+  fi
 fi
 
-rm -rf /opt/zaproxy
-mv "$ZAP_DIR" /opt/zaproxy
-
-# Make zap.sh executable and create symlink
-chmod +x /opt/zaproxy/zap.sh
-ln -sf /opt/zaproxy/zap.sh /usr/local/bin/zap
-
-echo "  ZAP installed at /opt/zaproxy"
+# Ensure zap.sh is executable and symlinked
+if [ -f /opt/zaproxy/zap.sh ]; then
+  chmod +x /opt/zaproxy/zap.sh
+  ln -sf /opt/zaproxy/zap.sh /usr/local/bin/zap
+  echo "  ZAP installed at /opt/zaproxy"
+fi
 
 # ─── STEP 6: CONFIGURE ZAP FOR DAEMON MODE ──────────────────────────────────
 echo ""
@@ -159,54 +171,75 @@ echo "  ZAP daemon service configured (port 8090, API key: $ZAP_API_KEY)"
 echo ""
 echo "[STEP 7/10] Installing Nessus Essentials..."
 
-cd /tmp
+mkdir -p "$LAB_HOME/scripts"
 
-# Download Nessus Essentials .deb
-# Note: Tenable changes download URLs; this gets the latest
-echo "  Downloading Nessus Essentials..."
-NESSUS_DEB="Nessus-10.8.3-ubuntu1604_amd64.deb"
-NESSUS_URL="https://www.tenable.com/downloads/api/v2/pages/nessus/files/${NESSUS_DEB}"
+if dpkg -l nessus 2>/dev/null | grep -q '^ii'; then
+  # ── Already installed ──────────────────────────────────────────────────────
+  echo "  Nessus already installed."
+  systemctl enable nessusd 2>/dev/null || true
+  systemctl start nessusd 2>/dev/null || true
 
-# Try download; if it fails (URL changes often), provide manual instructions
-if wget -q "$NESSUS_URL" -O nessus.deb 2>/dev/null; then
-  echo "  Downloaded Nessus .deb package."
 else
-  echo ""
-  echo "  ╔═══════════════════════════════════════════════════════════════════╗"
-  echo "  ║ MANUAL STEP REQUIRED: Nessus download URL has changed.          ║"
-  echo "  ║                                                                   ║"
-  echo "  ║ 1. Go to: https://www.tenable.com/downloads/nessus               ║"
-  echo "  ║ 2. Select: Nessus Essentials                                      ║"
-  echo "  ║ 3. Download the Ubuntu (amd64) .deb package                       ║"
-  echo "  ║ 4. Transfer it to this VM as /tmp/nessus.deb                      ║"
-  echo "  ║ 5. Run: sudo dpkg -i /tmp/nessus.deb                             ║"
-  echo "  ║ 6. Run: sudo systemctl enable nessusd && sudo systemctl start nessusd ║"
-  echo "  ╚═══════════════════════════════════════════════════════════════════╝"
-  echo ""
-  # Create a placeholder script for manual installation
-  cat > "$LAB_HOME/scripts/install-nessus-manual.sh" << 'NSCRIPT'
+  # ── Not yet installed — look for .deb ─────────────────────────────────────
+  # Search in: same dir as this script, then /tmp
+  NESSUS_DEB_PATH=""
+  for search_dir in "$SCRIPT_DIR" "/tmp" "$LAB_HOME"; do
+    found=$(find "$search_dir" -maxdepth 1 -iname "Nessus*.deb" 2>/dev/null | head -1)
+    if [ -n "$found" ]; then
+      NESSUS_DEB_PATH="$found"
+      break
+    fi
+  done
+
+  if [ -n "$NESSUS_DEB_PATH" ]; then
+    echo "  Found Nessus .deb: $NESSUS_DEB_PATH"
+    echo "  Installing Nessus..."
+    dpkg -i "$NESSUS_DEB_PATH" 2>/dev/null || apt-get install -f -y -qq
+    systemctl enable nessusd 2>/dev/null || true
+    systemctl start nessusd 2>/dev/null || true
+    echo "  Nessus installed. Complete first-time setup in the browser."
+  else
+    # ── .deb not found — inform and create helper ──────────────────────────
+    echo ""
+    echo "  ╔══════════════════════════════════════════════════════════════════╗"
+    echo "  ║  ACTION REQUIRED — Nessus .deb not found                       ║"
+    echo "  ║                                                                  ║"
+    echo "  ║  1. Go to: https://www.tenable.com/downloads/nessus             ║"
+    echo "  ║  2. Select: Nessus Essentials → Linux — Ubuntu (amd64)         ║"
+    echo "  ║  3. Download the file (name will contain 'Nessus' and end .deb) ║"
+    echo "  ║  4. Place the file in the same folder as student-setup.sh       ║"
+    echo "  ║     (e.g. ~/SASTandDAST-main/)                                  ║"
+    echo "  ║  5. Re-run: sudo bash student-setup.sh  (choose Lab 2 again)   ║"
+    echo "  ║                                                                  ║"
+    echo "  ║  OR: run ~/scripts/install-nessus.sh after placing the file     ║"
+    echo "  ╚══════════════════════════════════════════════════════════════════╝"
+    echo ""
+
+    # Create a helper that can be run once the .deb is placed in SCRIPT_DIR
+    cat > "$LAB_HOME/scripts/install-nessus.sh" << NSCRIPT
 #!/bin/bash
-# Run this after downloading the Nessus .deb to /tmp/nessus.deb
-if [ ! -f /tmp/nessus.deb ]; then
-  echo "Error: Place the Nessus .deb file at /tmp/nessus.deb first."
-  echo "Download from: https://www.tenable.com/downloads/nessus"
+# Place the Nessus .deb (filename containing 'Nessus', ending .deb)
+# in the same folder as student-setup.sh, then run this script.
+SCRIPT_DIR="${SCRIPT_DIR}"
+DEB=\$(find "\$SCRIPT_DIR" /tmp "$LAB_HOME" -maxdepth 1 -iname "Nessus*.deb" 2>/dev/null | head -1)
+if [ -z "\$DEB" ]; then
+  echo "Nessus .deb not found. Download from: https://www.tenable.com/downloads/nessus"
+  echo "Place the file in: \$SCRIPT_DIR"
   exit 1
 fi
-sudo dpkg -i /tmp/nessus.deb
+echo "Installing Nessus from: \$DEB"
+sudo dpkg -i "\$DEB" || sudo apt-get install -f -y
 sudo systemctl enable nessusd
 sudo systemctl start nessusd
 echo ""
-echo "Nessus installed! Access at: https://$(hostname -I | awk '{print $1}'):8834"
-echo "Complete setup in the browser (select Nessus Essentials, enter activation code)."
+echo "Nessus installed! Access at: https://\$(hostname -I | awk '{print \$1}'):8834"
+echo "First-time setup: select 'Nessus Essentials', enter activation code."
 NSCRIPT
-  chmod +x "$LAB_HOME/scripts/install-nessus-manual.sh" 2>/dev/null || true
-fi
-
-# Install if .deb exists
-if [ -f /tmp/nessus.deb ]; then
-  dpkg -i /tmp/nessus.deb || apt-get install -f -y
-  systemctl enable nessusd
-  echo "  Nessus installed. It will be configured via the web UI on first access."
+    chmod +x "$LAB_HOME/scripts/install-nessus.sh" 2>/dev/null || true
+    chown "$LAB_USER:$LAB_USER" "$LAB_HOME/scripts/install-nessus.sh" 2>/dev/null || true
+    echo "  Helper script created: ~/scripts/install-nessus.sh"
+    echo "  Nessus step skipped — all other Lab 2 components will still install."
+  fi
 fi
 
 # ─── STEP 8: INSTALL SUPPLEMENTARY TOOLS ─────────────────────────────────────
@@ -403,7 +436,7 @@ else
 fi
 SCRIPT
 
-chmod +x "$LAB_HOME/scripts/"*.sh
+chmod +x "$LAB_HOME/scripts/"*.sh 2>/dev/null || true
 chown -R "$LAB_USER:$LAB_USER" "$LAB_HOME/scripts"
 
 # ─── MOTD / WELCOME MESSAGE ─────────────────────────────────────────────────

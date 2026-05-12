@@ -15,7 +15,7 @@
 # Run as root: sudo bash vm03-target-setup.sh
 ###############################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
 LAB_USER="${LAB_USER:-${SUDO_USER:-$(logname 2>/dev/null || id -un 2>/dev/null || echo "labuser")}}"
@@ -82,28 +82,41 @@ systemctl restart ssh
 echo ""
 echo "[STEP 4/12] Installing Apache2 and PHP 8.1..."
 
-apt-get install -y -qq \
-  apache2 libapache2-mod-php \
-  php php-cli php-common php-mysql php-gd php-xml php-mbstring \
-  php-curl php-zip php-bcmath php-json php-tokenizer php-intl \
-  php-readline php-fileinfo php-dom php-pdo
+if dpkg -l apache2 2>/dev/null | grep -q '^ii'; then
+  echo "  Apache2 already installed."
+else
+  apt-get install -y -qq apache2 libapache2-mod-php
+fi
+if dpkg -l php 2>/dev/null | grep -q '^ii'; then
+  echo "  PHP already installed: $(php -v 2>&1 | head -1)"
+else
+  apt-get install -y -qq \
+    php php-cli php-common php-mysql php-gd php-xml php-mbstring \
+    php-curl php-zip php-bcmath php-json php-tokenizer php-intl \
+    php-readline php-fileinfo php-dom php-pdo
+fi
 
-# Enable required Apache modules
-a2enmod rewrite
-a2enmod headers
-a2enmod ssl
+# Enable required Apache modules (safe to re-run)
+a2enmod rewrite 2>/dev/null || true
+a2enmod headers 2>/dev/null || true
+a2enmod ssl 2>/dev/null || true
 
-# Allow .htaccess overrides
-sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
+# Allow .htaccess overrides — only patch if not already set
+grep -q 'AllowOverride All' /etc/apache2/apache2.conf 2>/dev/null || \
+  sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
 
-echo "  Apache + PHP installed."
+echo "  Apache + PHP ready."
 php -v 2>&1 | head -1
 
 # ─── STEP 5: INSTALL MARIADB ────────────────────────────────────────────────
 echo ""
 echo "[STEP 5/12] Installing MariaDB..."
 
-apt-get install -y -qq mariadb-server mariadb-client
+if dpkg -l mariadb-server 2>/dev/null | grep -q '^ii'; then
+  echo "  MariaDB already installed."
+else
+  apt-get install -y -qq mariadb-server mariadb-client
+fi
 systemctl enable mariadb
 systemctl start mariadb
 
@@ -1410,7 +1423,7 @@ echo "  Alice: alice@example.com / password123"
 echo "  Bob:   bob@example.com / password123"
 SCRIPT
 
-chmod +x "$LAB_HOME/scripts/"*.sh
+chmod +x "$LAB_HOME/scripts/"*.sh 2>/dev/null || true
 chown -R "$LAB_USER:$LAB_USER" "$LAB_HOME/scripts"
 
 # ─── MOTD ────────────────────────────────────────────────────────────────────

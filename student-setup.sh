@@ -9,7 +9,7 @@
 # automatically, then lets you choose which lab(s) to install.
 ###############################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # ─── COLOUR OUTPUT ───────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -212,36 +212,48 @@ prompt_peer_ips
 show_confirmation
 
 # Export all variables so child scripts inherit them
-export LAB_USER LAB_HOME THIS_IP LAB_IFACE VM01_IP VM02_IP VM03_IP
+export LAB_USER LAB_HOME THIS_IP LAB_IFACE VM01_IP VM02_IP VM03_IP SCRIPT_DIR
 
 echo ""
 echo -e "${BOLD}Starting installation...${NC}"
 echo ""
 
+# ─── SAFE SCRIPT RUNNER ──────────────────────────────────────────────────────
+# Runs a sub-script and continues even if it exits non-zero.
+# A failed sub-script does NOT stop the overall setup.
+run_lab() {
+  local label="$1"
+  local script="$SCRIPT_DIR/$2"
+  echo -e "${BOLD}${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${BOLD}${BLUE}║  $label${NC}"
+  echo -e "${BOLD}${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
+  echo ""
+  local rc=0
+  bash "$script" || rc=$?
+  echo ""
+  if [ "$rc" -eq 0 ]; then
+    echo -e "${GREEN}[DONE]${NC} $label completed successfully."
+  else
+    echo -e "${YELLOW}[WARN]${NC} $label finished with warnings (exit $rc)."
+    echo "       Check the log or run: sudo bash healthcheck.sh --fix"
+  fi
+  echo ""
+}
+
 case "$LAB_CHOICE" in
-  1)
-    bash "$SCRIPT_DIR/vm01-sonarqube-setup.sh"
-    ;;
-  2)
-    bash "$SCRIPT_DIR/vm02-zap-nessus-setup.sh"
-    ;;
-  3)
-    bash "$SCRIPT_DIR/vm03-target-setup.sh"
-    ;;
+  1) run_lab "Lab 1 — SonarQube SAST Hub"          "vm01-sonarqube-setup.sh" ;;
+  2) run_lab "Lab 2 — OWASP ZAP + Nessus"           "vm02-zap-nessus-setup.sh" ;;
+  3) run_lab "Lab 3 — Target Apps (DVWA + VulnShop)" "vm03-target-setup.sh" ;;
   4)
-    echo -e "${BOLD}[1/3] Installing Lab 1 — SonarQube...${NC}"
-    bash "$SCRIPT_DIR/vm01-sonarqube-setup.sh"
-    echo ""
-    echo -e "${BOLD}[2/3] Installing Lab 2 — ZAP + Nessus...${NC}"
-    bash "$SCRIPT_DIR/vm02-zap-nessus-setup.sh"
-    echo ""
-    echo -e "${BOLD}[3/3] Installing Lab 3 — Target Apps...${NC}"
-    bash "$SCRIPT_DIR/vm03-target-setup.sh"
+    run_lab "[1/3] Lab 1 — SonarQube SAST Hub"          "vm01-sonarqube-setup.sh"
+    run_lab "[2/3] Lab 2 — OWASP ZAP + Nessus"           "vm02-zap-nessus-setup.sh"
+    run_lab "[3/3] Lab 3 — Target Apps (DVWA + VulnShop)" "vm03-target-setup.sh"
     ;;
 esac
 
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║     Installation complete! Run ~/scripts/check-status.sh    ║${NC}"
+echo -e "${GREEN}${BOLD}║     Installation complete!                                  ║${NC}"
+echo -e "${GREEN}${BOLD}║     Run: sudo bash healthcheck.sh                           ║${NC}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""

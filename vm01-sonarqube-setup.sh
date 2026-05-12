@@ -14,7 +14,7 @@
 # Run as root: sudo bash vm01-sonarqube-setup.sh
 ###############################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
 LAB_USER="${LAB_USER:-${SUDO_USER:-$(logname 2>/dev/null || id -un 2>/dev/null || echo "labuser")}}"
@@ -78,15 +78,15 @@ systemctl restart ssh
 echo ""
 echo "[STEP 4/10] Kernel tuning for SonarQube (Elasticsearch requirements)..."
 
-cat >> /etc/sysctl.conf << 'EOF'
+grep -q 'vm.max_map_count=524288' /etc/sysctl.conf 2>/dev/null || cat >> /etc/sysctl.conf << 'EOF'
 
 # SonarQube / Elasticsearch requirements
 vm.max_map_count=524288
 fs.file-max=131072
 EOF
-sysctl -p
+sysctl -p 2>/dev/null || true
 
-cat >> /etc/security/limits.conf << 'EOF'
+grep -q 'sonarqube.*nofile.*131072' /etc/security/limits.conf 2>/dev/null || cat >> /etc/security/limits.conf << 'EOF'
 
 # SonarQube limits
 sonarqube   -   nofile   131072
@@ -97,23 +97,33 @@ EOF
 echo ""
 echo "[STEP 5/10] Installing OpenJDK 17..."
 
-apt-get install -y -qq openjdk-17-jdk
-java -version 2>&1 | head -1
+if java -version 2>&1 | grep -q 'version "17'; then
+  echo "  Java 17 already installed: $(java -version 2>&1 | head -1)"
+else
+  apt-get install -y -qq openjdk-17-jdk
+  echo "  Installed: $(java -version 2>&1 | head -1)"
+fi
 echo "  JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64"
 
 # ─── STEP 6: INSTALL & CONFIGURE POSTGRESQL ─────────────────────────────────
 echo ""
 echo "[STEP 6/10] Installing and configuring PostgreSQL..."
 
-apt-get install -y -qq postgresql postgresql-contrib
+if dpkg -l postgresql 2>/dev/null | grep -q '^ii'; then
+  echo "  PostgreSQL already installed."
+else
+  apt-get install -y -qq postgresql postgresql-contrib
+fi
 systemctl enable postgresql
 systemctl start postgresql
+# Wait briefly for PostgreSQL to fully start
+sleep 2
 
-# Create SonarQube database and user
+# Create SonarQube database and user (safe if already exists)
 sudo -u postgres psql -c "CREATE USER $SONAR_DB_USER WITH ENCRYPTED PASSWORD '$SONAR_DB_PASS';" 2>/dev/null || echo "  DB user already exists."
 sudo -u postgres psql -c "CREATE DATABASE $SONAR_DB_NAME OWNER $SONAR_DB_USER;" 2>/dev/null || echo "  Database already exists."
-sudo -u postgres psql -c "ALTER USER $SONAR_DB_USER SET search_path TO public;" 2>/dev/null
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $SONAR_DB_NAME TO $SONAR_DB_USER;" 2>/dev/null
+sudo -u postgres psql -c "ALTER USER $SONAR_DB_USER SET search_path TO public;" 2>/dev/null || true
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $SONAR_DB_NAME TO $SONAR_DB_USER;" 2>/dev/null || true
 
 echo "  PostgreSQL configured with database: $SONAR_DB_NAME"
 
@@ -126,16 +136,21 @@ if ! id "sonarqube" &>/dev/null; then
   useradd -r -s /bin/false -d /opt/sonarqube sonarqube
 fi
 
-# Download and extract
-cd /tmp
-if [ ! -f "sonarqube-${SONARQUBE_VERSION}.zip" ]; then
-  echo "  Downloading SonarQube..."
-  wget -q "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-${SONARQUBE_VERSION}.zip"
+# Download and extract only if not already installed at this version
+if [ -d /opt/sonarqube ] && [ -f /opt/sonarqube/bin/linux-x86-64/sonar.sh ]; then
+  echo "  SonarQube already installed at /opt/sonarqube — reconfiguring only."
+else
+  cd /tmp
+  if [ ! -f "sonarqube-${SONARQUBE_VERSION}.zip" ]; then
+    echo "  Downloading SonarQube v${SONARQUBE_VERSION}..."
+    wget -q "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-${SONARQUBE_VERSION}.zip"
+  else
+    echo "  Using cached download: sonarqube-${SONARQUBE_VERSION}.zip"
+  fi
+  unzip -qo "sonarqube-${SONARQUBE_VERSION}.zip" -d /opt/
+  rm -rf /opt/sonarqube
+  mv "/opt/sonarqube-${SONARQUBE_VERSION}" /opt/sonarqube
 fi
-
-unzip -qo "sonarqube-${SONARQUBE_VERSION}.zip" -d /opt/
-rm -rf /opt/sonarqube
-mv "/opt/sonarqube-${SONARQUBE_VERSION}" /opt/sonarqube
 
 # Configure SonarQube
 cat > /opt/sonarqube/conf/sonar.properties << EOF
@@ -192,14 +207,20 @@ echo "  SonarQube installed at /opt/sonarqube"
 echo ""
 echo "[STEP 8/10] Installing SonarScanner CLI v${SONARSCANNER_VERSION}..."
 
-cd /tmp
-if [ ! -f "sonar-scanner-cli-${SONARSCANNER_VERSION}-linux-x64.zip" ]; then
-  wget -q "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONARSCANNER_VERSION}-linux-x64.zip"
+if [ -d /opt/sonar-scanner ] && [ -f /opt/sonar-scanner/bin/sonar-scanner ]; then
+  echo "  SonarScanner already installed at /opt/sonar-scanner — skipping download."
+else
+  cd /tmp
+  if [ ! -f "sonar-scanner-cli-${SONARSCANNER_VERSION}-linux-x64.zip" ]; then
+    echo "  Downloading SonarScanner CLI v${SONARSCANNER_VERSION}..."
+    wget -q "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONARSCANNER_VERSION}-linux-x64.zip"
+  else
+    echo "  Using cached download."
+  fi
+  unzip -qo "sonar-scanner-cli-${SONARSCANNER_VERSION}-linux-x64.zip" -d /opt/
+  rm -rf /opt/sonar-scanner
+  mv "/opt/sonar-scanner-${SONARSCANNER_VERSION}-linux-x64" /opt/sonar-scanner
 fi
-
-unzip -qo "sonar-scanner-cli-${SONARSCANNER_VERSION}-linux-x64.zip" -d /opt/
-rm -rf /opt/sonar-scanner
-mv "/opt/sonar-scanner-${SONARSCANNER_VERSION}-linux-x64" /opt/sonar-scanner
 
 # Add to PATH globally
 cat > /etc/profile.d/sonar-scanner.sh << 'EOF'
@@ -293,7 +314,7 @@ echo ""
 echo "Scan complete. View results: http://localhost:9000/dashboard?id=$PROJECT_KEY"
 SCRIPT
 
-chmod +x "$LAB_HOME/scripts/"*.sh
+chmod +x "$LAB_HOME/scripts/"*.sh 2>/dev/null || true
 chown -R "$LAB_USER:$LAB_USER" "$LAB_HOME/scripts"
 
 # ─── MOTD / WELCOME MESSAGE ─────────────────────────────────────────────────
