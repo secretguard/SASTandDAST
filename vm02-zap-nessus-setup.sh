@@ -167,7 +167,44 @@ systemctl enable zap-daemon
 
 echo "  ZAP daemon service configured (port 8090, API key: $ZAP_API_KEY)"
 
-# ─── STEP 7: INSTALL NESSUS ESSENTIALS ───────────────────────────────────────
+# ─── STEP 6b: ZAP GUI SETUP ──────────────────────────────────────────────────
+echo ""
+echo "[STEP 6b/10] Setting up ZAP GUI launcher..."
+
+# Install Swing/AWT display libraries needed to run ZAP in GUI mode.
+# libasound is named differently on Ubuntu 22 vs 24 — try both.
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y -qq libgtk-3-0 libxtst6 libgl1 xdg-utils 2>/dev/null || true
+apt-get install -y -qq libasound2 2>/dev/null || apt-get install -y -qq libasound2t64 2>/dev/null || true
+
+# Locate ZAP icon bundled in the tarball (name varies by release)
+ZAP_ICON=$(find /opt/zaproxy -maxdepth 2 -name "*.png" 2>/dev/null | head -1)
+[ -z "$ZAP_ICON" ] && ZAP_ICON="/opt/zaproxy/zap.png"
+
+# ── Desktop application launcher (shows in GNOME/KDE app menu) ───────────────
+cat > /usr/share/applications/zaproxy.desktop << EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OWASP ZAP
+GenericName=Web Security Scanner
+Comment=Zed Attack Proxy — interactive web application security testing
+Exec=/opt/zaproxy/zap.sh
+Icon=${ZAP_ICON}
+Terminal=false
+Categories=Security;Network;Development;
+Keywords=security;proxy;scanner;web;owasp;zap;dast;
+StartupNotify=true
+StartupWMClass=org-zaproxy-zap-ZAP
+EOF
+chmod 644 /usr/share/applications/zaproxy.desktop
+update-desktop-database /usr/share/applications/ 2>/dev/null || true
+
+echo "  Desktop launcher created: /usr/share/applications/zaproxy.desktop"
+echo "  ZAP will appear in your application menu (Security / Network)."
+echo "  If using a desktop session, you can also click the app icon to launch it."
+
+# ── STEP 7: INSTALL NESSUS ESSENTIALS ────────────────────────────────────────
 echo ""
 echo "[STEP 7/10] Installing Nessus Essentials..."
 
@@ -436,6 +473,97 @@ else
 fi
 SCRIPT
 
+# ── ZAP GUI launcher script ───────────────────────────────────────────────────
+# Handles display detection (desktop session, X11 forwarding, Wayland).
+# Stops the ZAP daemon first so both don't compete for the same data directory.
+cat > "$LAB_HOME/scripts/zap-gui.sh" << 'SCRIPT'
+#!/bin/bash
+###############################################################################
+# ZAP GUI Launcher
+# Launches OWASP ZAP in full graphical (interactive) mode.
+#
+# Requirements — ONE of:
+#   • Desktop VM    : just run this script while logged into the desktop.
+#   • SSH + X11     : connect with "ssh -X user@<ip>", then run this script.
+#   • SSH + Windows : use MobaXterm (X11 built-in) or enable X11 in PuTTY.
+###############################################################################
+
+ZAP_BIN="/opt/zaproxy/zap.sh"
+
+# ── Preflight ────────────────────────────────────────────────────────────────
+if [ ! -f "$ZAP_BIN" ]; then
+  echo "[ERROR] ZAP not found at $ZAP_BIN"
+  echo "        Run Lab 2 setup first: sudo bash student-setup.sh"
+  exit 1
+fi
+
+# ── Daemon conflict check ─────────────────────────────────────────────────────
+if systemctl is-active zap-daemon &>/dev/null; then
+  echo ""
+  echo "[WARN] ZAP daemon is currently running (port 8090)."
+  echo "       The daemon and GUI share the same data directory (~/.ZAP)."
+  echo "       Running both simultaneously can corrupt session data."
+  echo ""
+  read -r -p "  Stop ZAP daemon and launch GUI? [Y/n]: " ANS
+  if [[ "${ANS:-Y}" =~ ^[Nn]$ ]]; then
+    echo "Aborted. Daemon left running."
+    exit 0
+  fi
+  echo "  Stopping ZAP daemon..."
+  sudo systemctl stop zap-daemon
+  echo "  Daemon stopped. It will restart automatically after reboot."
+  echo "  To restart manually: sudo systemctl start zap-daemon"
+  echo ""
+fi
+
+# ── Display detection ─────────────────────────────────────────────────────────
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  # Try the local console display (:0) — works if a desktop session is running
+  if xdpyinfo -display :0 &>/dev/null 2>&1; then
+    export DISPLAY=:0
+    echo "[INFO] Using local display :0"
+  else
+    echo ""
+    echo "[ERROR] No graphical display found."
+    echo ""
+    echo "  ZAP GUI requires a display. Choose one of:"
+    echo ""
+    echo "  A) Desktop session (easiest)"
+    echo "     Log into the VM desktop, open a terminal, and run:"
+    echo "       ~/scripts/zap-gui.sh"
+    echo ""
+    echo "  B) SSH with X11 forwarding (Linux/macOS host)"
+    echo "     Disconnect, then reconnect with:"
+    echo "       ssh -X $(whoami)@$(hostname -I | awk '{print $1}')"
+    echo "     Then run: ~/scripts/zap-gui.sh"
+    echo ""
+    echo "  C) SSH from Windows"
+    echo "     • MobaXterm: X11 forwarding is built-in — just reconnect and run."
+    echo "     • PuTTY: Connection → SSH → X11 → Enable X11 forwarding → tick box."
+    echo ""
+    echo "  D) Headless / daemon mode (no display needed)"
+    echo "     The ZAP daemon is available at: http://$(hostname -I | awk '{print $1}'):8090"
+    echo "     API key: lab-api-key-2024"
+    echo "     Scripts: ~/scripts/zap-scan.sh  ~/scripts/zap-export-ca.sh"
+    echo ""
+    exit 1
+  fi
+fi
+
+# ── Launch ───────────────────────────────────────────────────────────────────
+echo ""
+echo "[INFO] Launching OWASP ZAP GUI..."
+echo "       First launch may take 20-30 seconds."
+echo "       ZAP will open with its built-in proxy on port 8080."
+echo ""
+echo "  When done, use File → Exit in ZAP."
+echo "  To restart the daemon afterwards: sudo systemctl start zap-daemon"
+echo ""
+
+cd /opt/zaproxy
+exec "$ZAP_BIN" "$@"
+SCRIPT
+
 chmod +x "$LAB_HOME/scripts/"*.sh 2>/dev/null || true
 chown -R "$LAB_USER:$LAB_USER" "$LAB_HOME/scripts"
 
@@ -448,17 +576,25 @@ cat > /etc/motd << 'EOF'
  ║  Sarath G | www.sarathg.me                                  ║
  ╠══════════════════════════════════════════════════════════════╣
  ║                                                              ║
- ║  OWASP ZAP:  Daemon on port 8090                            ║
- ║              API Key: lab-api-key-2024                       ║
- ║  Nessus:     https://<this-ip>:8834                         ║
+ ║  ZAP Daemon (headless)                                       ║
+ ║    API:     http://<this-ip>:8090                           ║
+ ║    API Key: lab-api-key-2024                                 ║
+ ║    Start:   sudo systemctl start zap-daemon                 ║
  ║                                                              ║
- ║  Helper scripts:  ~/scripts/check-status.sh                 ║
- ║                   ~/scripts/zap-scan.sh <url> [type]        ║
- ║                   ~/scripts/zap-export-ca.sh                ║
- ║                   ~/scripts/nessus-check.sh                 ║
+ ║  ZAP GUI (interactive)                                       ║
+ ║    Desktop: click OWASP ZAP in app menu                     ║
+ ║    SSH+X11: ssh -X user@<ip>  then  ~/scripts/zap-gui.sh   ║
  ║                                                              ║
- ║  Targets:    http://<vm03-ip>/dvwa/                      ║
- ║              http://<vm03-ip>:8080 (VulnShop)            ║
+ ║  Nessus:   https://<this-ip>:8834                           ║
+ ║                                                              ║
+ ║  Scripts:  ~/scripts/zap-gui.sh       (GUI mode)           ║
+ ║            ~/scripts/zap-scan.sh      (headless scan)       ║
+ ║            ~/scripts/zap-export-ca.sh (export CA cert)      ║
+ ║            ~/scripts/check-status.sh                        ║
+ ║            ~/scripts/nessus-check.sh                        ║
+ ║                                                              ║
+ ║  Targets:  http://<vm03-ip>/dvwa/                           ║
+ ║            http://<vm03-ip>:8080  (VulnShop)                ║
  ║                                                              ║
  ╚══════════════════════════════════════════════════════════════╝
 
@@ -499,15 +635,28 @@ echo "======================================================================"
 echo " VM-02 SETUP COMPLETE"
 echo "======================================================================"
 echo ""
-echo " OWASP ZAP Daemon:   http://$THIS_IP:8090 (API key: $ZAP_API_KEY)"
-echo " Nessus Essentials:  https://$THIS_IP:8834"
-echo " Lab User:           $LAB_USER (home: $LAB_HOME)"
-echo " Helper Scripts:     $LAB_HOME/scripts/"
-echo " Log File:           $LOG_FILE"
+echo " ZAP (Headless Daemon):  http://$THIS_IP:8090"
+echo "   API key:              $ZAP_API_KEY"
+echo "   Control:              sudo systemctl start|stop|status zap-daemon"
 echo ""
-echo " IMPORTANT:"
-echo "   - Nessus requires browser-based first-time setup"
-echo "   - Get activation code: https://www.tenable.com/products/nessus/nessus-essentials"
+echo " ZAP (GUI / Interactive):"
+echo "   Desktop session:      Click 'OWASP ZAP' in the application menu"
+echo "   SSH with X11:         ssh -X $LAB_USER@$THIS_IP"
+echo "                         then run: ~/scripts/zap-gui.sh"
+echo "   Windows (MobaXterm):  Connect → run: ~/scripts/zap-gui.sh"
+echo ""
+echo " Nessus Essentials:      https://$THIS_IP:8834"
+echo "   (browser-based first-time setup required)"
+echo "   Activation code:      https://www.tenable.com/products/nessus/nessus-essentials"
+echo ""
+echo " Lab User:               $LAB_USER (home: $LAB_HOME)"
+echo " Helper Scripts:         $LAB_HOME/scripts/"
+echo "   zap-gui.sh            Launch ZAP in GUI/interactive mode"
+echo "   zap-scan.sh           Run a headless scan via daemon API"
+echo "   zap-export-ca.sh      Export ZAP root CA certificate"
+echo "   nessus-check.sh       Nessus service status and first-time setup guide"
+echo "   check-status.sh       Overall service health summary"
+echo " Log File:               $LOG_FILE"
 echo ""
 echo " Completed: $(date)"
 echo "======================================================================"

@@ -398,6 +398,36 @@ fix_zap_symlink() {
   ln -sf "$ZAP_DIR/zap.sh" /usr/local/bin/zap
 }
 
+fix_zap_gui_deps() {
+  echo -e "  ${CYAN}${FIX_SYM}${NC} Installing ZAP GUI display libraries..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y -qq libgtk-3-0 libxtst6 libgl1 xdg-utils 2>/dev/null || true
+  apt-get install -y -qq libasound2 2>/dev/null || apt-get install -y -qq libasound2t64 2>/dev/null || true
+}
+
+fix_zap_desktop() {
+  echo -e "  ${CYAN}${FIX_SYM}${NC} Creating ZAP desktop launcher..."
+  local icon; icon=$(find /opt/zaproxy -maxdepth 2 -name "*.png" 2>/dev/null | head -1)
+  [ -z "$icon" ] && icon="/opt/zaproxy/zap.png"
+  cat > /usr/share/applications/zaproxy.desktop << EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OWASP ZAP
+GenericName=Web Security Scanner
+Comment=Zed Attack Proxy — interactive web application security testing
+Exec=/opt/zaproxy/zap.sh
+Icon=${icon}
+Terminal=false
+Categories=Security;Network;Development;
+Keywords=security;proxy;scanner;web;owasp;zap;dast;
+StartupNotify=true
+StartupWMClass=org-zaproxy-zap-ZAP
+EOF
+  chmod 644 /usr/share/applications/zaproxy.desktop
+  update-desktop-database /usr/share/applications/ 2>/dev/null || true
+}
+
 fix_nessus_service() {
   echo -e "  ${CYAN}${FIX_SYM}${NC} Starting Nessus..."
   systemctl enable nessusd 2>/dev/null || true
@@ -407,25 +437,35 @@ fix_nessus_service() {
 fix_lab2_scripts() {
   echo -e "  ${CYAN}${FIX_SYM}${NC} Recreating Lab 2 helper scripts..."
   fix_scripts_dir
+
+  # ── check-status.sh ──────────────────────────────────────────────────────
   cat > "$LAB_HOME/scripts/check-status.sh" << SCRIPT
 #!/bin/bash
 echo "=== Lab 2 — ZAP + Nessus Status ==="
 echo ""
-echo "--- OWASP ZAP Daemon ---"
+echo "--- ZAP Daemon (headless) ---"
 if systemctl is-active zap-daemon &>/dev/null; then
   echo "Status: RUNNING"
   ZAP_VER=\$(curl -sf --max-time 5 'http://localhost:$ZAP_PORT/JSON/core/view/version/?apikey=$ZAP_API_KEY' 2>/dev/null | jq -r '.version' 2>/dev/null || echo "starting...")
-  echo "Version: \$ZAP_VER  |  API: http://localhost:$ZAP_PORT"
+  echo "Version: \$ZAP_VER  |  API: http://localhost:$ZAP_PORT  |  Key: $ZAP_API_KEY"
 else
-  echo "Status: STOPPED — sudo systemctl start zap-daemon"
+  echo "Status: STOPPED — run: sudo systemctl start zap-daemon"
 fi
 echo ""
+echo "--- ZAP GUI ---"
+echo "Desktop session: click 'OWASP ZAP' in application menu"
+echo "SSH + X11:       ssh -X $LAB_USER@\$(hostname -I | awk '{print \$1}')  then: ~/scripts/zap-gui.sh"
+echo ""
 echo "--- Nessus ---"
-systemctl is-active nessusd &>/dev/null && echo "Status: RUNNING  |  https://\$(hostname -I | awk '{print \$1}'):$NESSUS_PORT" || echo "Status: STOPPED (or not installed)"
+systemctl is-active nessusd &>/dev/null && \
+  echo "Status: RUNNING  |  https://\$(hostname -I | awk '{print \$1}'):$NESSUS_PORT" || \
+  echo "Status: STOPPED (or not installed)"
 echo ""
 df -h / | tail -1 | awk '{print "Disk: " \$3 " / " \$2 " (" \$5 ")"}'
 free -h | grep Mem | awk '{print "RAM:  " \$3 " / " \$2}'
 SCRIPT
+
+  # ── zap-scan.sh ──────────────────────────────────────────────────────────
   cat > "$LAB_HOME/scripts/zap-scan.sh" << 'SCRIPT'
 #!/bin/bash
 TARGET=${1:?"Usage: $0 <target-url> [passive|active|spider]"}
@@ -455,14 +495,132 @@ echo ""
 echo "--- Alerts ---"
 curl -sf "$ZAP_URL/JSON/alert/view/alertsSummary/?apikey=$APIKEY&baseurl=$TARGET" | jq '.' 2>/dev/null || echo "No alerts or jq missing."
 SCRIPT
+
+  # ── zap-export-ca.sh ─────────────────────────────────────────────────────
   cat > "$LAB_HOME/scripts/zap-export-ca.sh" << SCRIPT
 #!/bin/bash
 OUTPUT="\${1:-$LAB_HOME/zap-root-ca.cer}"
 curl -sf "http://localhost:$ZAP_PORT/OTHER/core/other/rootcert/?apikey=$ZAP_API_KEY" -o "\$OUTPUT"
-[ -f "\$OUTPUT" ] && echo "CA exported to: \$OUTPUT" || echo "Export failed — is ZAP running?"
+if [ -f "\$OUTPUT" ]; then
+  echo "CA certificate exported to: \$OUTPUT"
+  echo ""
+  echo "Import into Firefox:"
+  echo "  Settings > Privacy & Security > View Certificates > Import"
+  echo "  Tick: Trust this CA to identify websites"
+else
+  echo "Export failed — is ZAP daemon running? (sudo systemctl status zap-daemon)"
+fi
 SCRIPT
+
+  # ── zap-gui.sh ───────────────────────────────────────────────────────────
+  cat > "$LAB_HOME/scripts/zap-gui.sh" << 'SCRIPT'
+#!/bin/bash
+###############################################################################
+# ZAP GUI Launcher
+# Launches OWASP ZAP in full graphical (interactive) mode.
+#
+# Requirements — ONE of:
+#   • Desktop VM    : just run this script while logged into the desktop.
+#   • SSH + X11     : connect with "ssh -X user@<ip>", then run this script.
+#   • SSH + Windows : use MobaXterm (X11 built-in) or enable X11 in PuTTY.
+###############################################################################
+
+ZAP_BIN="/opt/zaproxy/zap.sh"
+
+if [ ! -f "$ZAP_BIN" ]; then
+  echo "[ERROR] ZAP not found at $ZAP_BIN"
+  echo "        Run Lab 2 setup first: sudo bash student-setup.sh"
+  exit 1
+fi
+
+# ── Daemon conflict check ─────────────────────────────────────────────────────
+if systemctl is-active zap-daemon &>/dev/null; then
+  echo ""
+  echo "[WARN] ZAP daemon is currently running (port 8090)."
+  echo "       The daemon and GUI share ~/.ZAP — running both can corrupt session data."
+  echo ""
+  read -r -p "  Stop daemon and launch GUI? [Y/n]: " ANS
+  if [[ "${ANS:-Y}" =~ ^[Nn]$ ]]; then
+    echo "Aborted. Daemon left running."
+    exit 0
+  fi
+  echo "  Stopping ZAP daemon..."
+  sudo systemctl stop zap-daemon
+  echo "  Daemon stopped. To restart: sudo systemctl start zap-daemon"
+  echo ""
+fi
+
+# ── Display detection ─────────────────────────────────────────────────────────
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  if xdpyinfo -display :0 &>/dev/null 2>&1; then
+    export DISPLAY=:0
+    echo "[INFO] Using local display :0"
+  else
+    echo ""
+    echo "[ERROR] No graphical display found."
+    echo ""
+    echo "  Choose one of the following:"
+    echo ""
+    echo "  A) Desktop session (easiest)"
+    echo "     Log into the VM desktop, open a terminal, and run:"
+    echo "       ~/scripts/zap-gui.sh"
+    echo ""
+    echo "  B) SSH with X11 forwarding (Linux / macOS host)"
+    echo "     Reconnect with:  ssh -X $(whoami)@$(hostname -I | awk '{print $1}')"
+    echo "     Then run:        ~/scripts/zap-gui.sh"
+    echo ""
+    echo "  C) SSH from Windows"
+    echo "     MobaXterm: X11 forwarding is built-in — reconnect and run the script."
+    echo "     PuTTY:     Connection → SSH → X11 → Enable X11 forwarding → reconnect."
+    echo ""
+    echo "  D) Stay headless — use the ZAP daemon instead:"
+    echo "     sudo systemctl start zap-daemon"
+    echo "     ~/scripts/zap-scan.sh <target-url> [passive|active|spider]"
+    echo ""
+    exit 1
+  fi
+fi
+
+# ── Launch ───────────────────────────────────────────────────────────────────
+echo "[INFO] Launching OWASP ZAP GUI..."
+echo "       First launch may take 20-30 seconds to load."
+echo "       ZAP proxy will listen on port 8080 (browser proxy settings)."
+echo ""
+echo "  When done: File → Exit in ZAP."
+echo "  Restart daemon afterwards: sudo systemctl start zap-daemon"
+echo ""
+cd /opt/zaproxy
+exec "$ZAP_BIN" "$@"
+SCRIPT
+
+  # ── nessus-check.sh ──────────────────────────────────────────────────────
+  cat > "$LAB_HOME/scripts/nessus-check.sh" << 'SCRIPT'
+#!/bin/bash
+echo "=== Nessus Essentials Status ==="
+if systemctl is-active nessusd &>/dev/null; then
+  echo "Service: RUNNING"
+  echo "Web UI:  https://$(hostname -I | awk '{print $1}'):8834"
+  echo ""
+  echo "First-time setup steps:"
+  echo "  1. Accept the self-signed certificate in your browser"
+  echo "  2. Select 'Nessus Essentials'"
+  echo "  3. Enter your activation code (free from tenable.com)"
+  echo "  4. Create an admin username and password"
+  echo "  5. Wait for plugin download (~10-15 minutes)"
+else
+  echo "Service: STOPPED (or Nessus not installed)"
+  echo ""
+  echo "To start:   sudo systemctl start nessusd"
+  echo "To install: place Nessus*.deb in the lab folder and re-run student-setup.sh"
+  echo "Download:   https://www.tenable.com/downloads/nessus"
+fi
+SCRIPT
+
   chmod +x "$LAB_HOME/scripts/"*.sh 2>/dev/null || true
   chown -R "$LAB_USER:$LAB_USER" "$LAB_HOME/scripts"
+
+  # Also ensure the desktop launcher exists
+  fix_zap_desktop
 }
 
 # ── Lab 3 fixes ───────────────────────────────────────────────────────────────
@@ -878,6 +1036,46 @@ check_lab2() {
     info "ZAP takes 1-2 min to start. Check: sudo systemctl status zap-daemon"
   fi
 
+  subsection "ZAP GUI"
+  # Check display libraries required to run ZAP in graphical mode
+  for lib in libgtk-3-0 libxtst6 libgl1; do
+    dpkg -l "$lib" 2>/dev/null | grep -q '^ii' && pass "GUI lib: $lib" || \
+      fail "GUI lib missing: $lib" "fix_zap_gui_deps"
+  done
+  # libasound differs by Ubuntu version — accept either
+  if dpkg -l libasound2 2>/dev/null | grep -q '^ii' || \
+     dpkg -l libasound2t64 2>/dev/null | grep -q '^ii'; then
+    pass "GUI lib: libasound2 (or libasound2t64)"
+  else
+    fail "GUI lib missing: libasound2 / libasound2t64" "fix_zap_gui_deps"
+  fi
+  # Desktop launcher (.desktop file for the app menu)
+  if [ -f /usr/share/applications/zaproxy.desktop ]; then
+    pass "Desktop launcher: /usr/share/applications/zaproxy.desktop"
+    grep -q "Exec=/opt/zaproxy/zap.sh" /usr/share/applications/zaproxy.desktop 2>/dev/null && \
+      pass "Desktop launcher Exec points to /opt/zaproxy/zap.sh" || \
+      warn "Desktop launcher Exec line may be incorrect"
+    grep -q "Categories=.*Security" /usr/share/applications/zaproxy.desktop 2>/dev/null && \
+      pass "Desktop launcher Categories include Security" || \
+      warn "Desktop launcher Categories may be missing Security"
+  else
+    fail "Desktop launcher missing: /usr/share/applications/zaproxy.desktop" "fix_zap_desktop"
+  fi
+  # zap-gui.sh helper script
+  if [ -f "$LAB_HOME/scripts/zap-gui.sh" ]; then
+    pass "~/scripts/zap-gui.sh exists"
+    [ -x "$LAB_HOME/scripts/zap-gui.sh" ] && pass "zap-gui.sh is executable" || \
+      fail "zap-gui.sh not executable" "fix_lab2_scripts"
+  else
+    fail "~/scripts/zap-gui.sh missing" "fix_lab2_scripts"
+  fi
+  # Informational: display availability
+  if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    info "Display detected (${DISPLAY:-$WAYLAND_DISPLAY}) — ZAP GUI can launch now"
+  else
+    info "No display in this session — use 'ssh -X' or desktop login for ZAP GUI"
+  fi
+
   subsection "Python Tools"
   command -v python3 &>/dev/null && pass "python3: $(python3 --version 2>&1)" || warn "python3 not found"
   for m in requests bs4; do
@@ -910,7 +1108,7 @@ check_lab2() {
   fi
 
   subsection "Helper Scripts"
-  for s in check-status.sh zap-scan.sh zap-export-ca.sh; do
+  for s in check-status.sh zap-scan.sh zap-export-ca.sh zap-gui.sh nessus-check.sh; do
     [ -f "$LAB_HOME/scripts/$s" ] && pass "~/scripts/$s" || \
       fail "~/scripts/$s missing" "fix_lab2_scripts"
   done
