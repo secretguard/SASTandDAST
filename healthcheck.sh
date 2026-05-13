@@ -708,8 +708,9 @@ fix_vulnshop_vhost() {
     CustomLog \${APACHE_LOG_DIR}/vulnshop_access.log combined
 </VirtualHost>
 EOF
-  grep -q "^Listen $VULNSHOP_PORT" /etc/apache2/ports.conf 2>/dev/null || \
-    echo "Listen $VULNSHOP_PORT" >> /etc/apache2/ports.conf
+  # Remove any duplicate Listen lines, then add exactly one (prevents "multiple Listeners" error)
+  sed -i "/^[[:space:]]*Listen[[:space:]]\+${VULNSHOP_PORT}/d" /etc/apache2/ports.conf 2>/dev/null || true
+  echo "Listen $VULNSHOP_PORT" >> /etc/apache2/ports.conf
   a2enmod rewrite 2>/dev/null || true
   a2ensite vulnshop.conf 2>/dev/null || true
   apache2ctl configtest 2>/dev/null && systemctl reload apache2 2>/dev/null || \
@@ -1223,8 +1224,13 @@ check_lab3() {
     { [ -f /etc/apache2/sites-enabled/vulnshop.conf ] || \
       [ -L /etc/apache2/sites-enabled/vulnshop.conf ]; } && \
       pass "vulnshop.conf enabled" || fail "vulnshop.conf not enabled" "fix_vulnshop_vhost"
-    grep -q "^Listen $VULNSHOP_PORT" /etc/apache2/ports.conf 2>/dev/null && \
-      pass "Apache: Listen $VULNSHOP_PORT" || \
+    # Detect stale "Listen 8080" inside vulnshop.conf (old setup pattern) and fix it
+    if [ -f /etc/apache2/sites-available/vulnshop.conf ] && \
+       grep -q "^[[:space:]]*Listen[[:space:]]\+$VULNSHOP_PORT" /etc/apache2/sites-available/vulnshop.conf 2>/dev/null; then
+      fail "Listen $VULNSHOP_PORT inside vulnshop.conf (must be in ports.conf only)" "fix_vulnshop_vhost"
+    fi
+    grep -q "^[[:space:]]*Listen[[:space:]]\+$VULNSHOP_PORT" /etc/apache2/ports.conf 2>/dev/null && \
+      pass "Apache: Listen $VULNSHOP_PORT in ports.conf" || \
       fail "Apache not listening on $VULNSHOP_PORT" "fix_vulnshop_vhost"
     [ -f /etc/apache2/sites-available/vulnshop.conf ] && \
       grep -q "DocumentRoot.*$VULNSHOP_DIR/public" \

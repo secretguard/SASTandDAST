@@ -1301,8 +1301,11 @@ cat > /etc/apache2/sites-available/000-default.conf << 'VHOST'
 VHOST
 
 # VulnShop on port 8080
+# Ensure exactly one Listen 8080 in ports.conf (remove duplicates, then add)
+sed -i "/^[[:space:]]*Listen[[:space:]]\+8080/d" /etc/apache2/ports.conf 2>/dev/null || true
+echo "Listen 8080" >> /etc/apache2/ports.conf
+
 cat > /etc/apache2/sites-available/vulnshop.conf << 'VHOST'
-Listen 8080
 <VirtualHost *:8080>
     ServerAdmin webmaster@localhost
     DocumentRoot /var/www/html/vulnshop/public
