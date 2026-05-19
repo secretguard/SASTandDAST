@@ -46,7 +46,7 @@ for arg in "${@:-}"; do
 done
 
 # ─── ROOT CHECK ──────────────────────────────────────────────────────────────
-if [ "$EUID" -ne 0 ]; then
+if [[ "$EUID" -ne 0 ]]; then
   echo -e "${RED}[ERROR]${NC} Please run with sudo: sudo bash healthcheck.sh"
   exit 1
 fi
