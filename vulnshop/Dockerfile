@@ -13,6 +13,7 @@ LABEL description="VulnShop: intentionally vulnerable Laravel e-commerce app for
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git unzip curl \
         libpng-dev libzip-dev libxml2-dev libonig-dev libcurl4-openssl-dev \
+        libicu-dev \
     && docker-php-ext-install pdo_mysql zip gd xml mbstring bcmath intl \
     && a2enmod rewrite headers \
     && rm -rf /var/lib/apt/lists/*
