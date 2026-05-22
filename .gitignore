@@ -1,0 +1,9 @@
+# Local environment overrides (root only — vulnshop/.env is committed intentionally as CWE-798)
+/.env
+
+# Claude Code local settings
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

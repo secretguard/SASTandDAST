@@ -1,0 +1,229 @@
+###############################################################################
+# SASTandDAST Lab — Docker Compose
+# Author: Sarath G | www.sarathg.me
+#
+# Usage:
+#   sudo bash student-setup.sh   ← recommended (installs Docker, sets kernel)
+#   docker compose up -d         ← if Docker is already installed
+#   docker compose down          ← stop all containers
+#   docker compose logs -f <svc> ← view service logs
+###############################################################################
+
+services:
+
+  # ══════════════════════════════════════════════
+  # Lab 1 — SAST: SonarQube + PostgreSQL
+  # URL: http://<ip>:9000  |  admin / admin
+  # ══════════════════════════════════════════════
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonarqube
+    hostname: sonarqube
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
+    ports:
+      - "${SONARQUBE_PORT:-9000}:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+    # Required by embedded Elasticsearch
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 4096
+        hard: 4096
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  sonar-db:
+    image: postgres:15-alpine
+    container_name: sonar-db
+    hostname: sonar-db
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonar
+    volumes:
+      - sonar_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════
+  # Lab 2 — DAST: OWASP ZAP
+  # API: http://<ip>:8090  |  key: lab-api-key-2024
+  # ══════════════════════════════════════════════
+  zap:
+    image: zaproxy/zap-stable
+    container_name: zap
+    hostname: zap
+    user: zap
+    entrypoint: []
+    command:
+      - zap.sh
+      - -daemon
+      - -port
+      - "8090"
+      - -host
+      - "0.0.0.0"
+      - -config
+      - "api.key=${ZAP_API_KEY:-lab-api-key-2024}"
+      - -config
+      - "api.addrs.addr.name=.*"
+      - -config
+      - "api.addrs.addr.regex=true"
+      - -config
+      - "api.disablekey=false"
+      - -config
+      - "connection.timeoutInSecs=120"
+    ports:
+      - "${ZAP_PORT:-8090}:8090"
+    volumes:
+      - zap_data:/zap/wrk
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:8090/JSON/core/view/version/?apikey=${ZAP_API_KEY:-lab-api-key-2024}' | grep -q version || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # ══════════════════════════════════════════════
+  # Lab 2 — DAST: Nessus Essentials
+  # URL: https://<ip>:8834  (activation required)
+  # ══════════════════════════════════════════════
+  nessus:
+    image: tenableofficial/nessus:latest
+    container_name: nessus
+    hostname: nessus
+    ports:
+      - "${NESSUS_PORT:-8834}:8834"
+    environment:
+      USERNAME: ${NESSUS_USERNAME:-admin}
+      PASSWORD: ${NESSUS_PASSWORD:-admin123}
+      ACTIVATION_CODE: ${NESSUS_ACTIVATION_CODE:-}
+    volumes:
+      - nessus_data:/opt/nessus/var/nessus
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════
+  # Lab 3 — Target: DVWA
+  # URL: http://<ip>:8888/  |  admin / password
+  # ══════════════════════════════════════════════
+  dvwa:
+    image: ghcr.io/digininja/dvwa:latest
+    container_name: dvwa
+    hostname: dvwa
+    depends_on:
+      dvwa-db:
+        condition: service_healthy
+    environment:
+      DB_SERVER: dvwa-db
+      DB_USER: dvwa
+      DB_PASSWORD: dvwa_pass
+      DB_DATABASE: dvwa
+      RECAPTCHA_PRIV_KEY: ""
+      RECAPTCHA_PUB_KEY: ""
+      SECURITY_LEVEL: low
+      PHPIDS_ENABLED: "0"
+      PHP_DISPLAY_ERRORS: "1"
+      CREATE_DB: "true"
+    ports:
+      - "${DVWA_PORT:-8888}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/dvwa/login.php | grep -q 'Login' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  dvwa-db:
+    image: mariadb:10
+    container_name: dvwa-db
+    hostname: dvwa-db
+    environment:
+      MYSQL_ROOT_PASSWORD: dvwa_root
+      MYSQL_DATABASE: dvwa
+      MYSQL_USER: dvwa
+      MYSQL_PASSWORD: dvwa_pass
+    volumes:
+      - dvwa_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════
+  # Lab 3 — Target: VulnShop (custom Laravel app)
+  # URL: http://<ip>:8080  |  admin@vulnshop.local / admin123
+  # ══════════════════════════════════════════════
+  vulnshop:
+    build:
+      context: ./vulnshop
+      dockerfile: Dockerfile
+    container_name: vulnshop
+    hostname: vulnshop
+    depends_on:
+      vulnshop-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: vulnshop-db
+      DB_DATABASE: vulnshop
+      DB_USERNAME: vulnshop_user
+      DB_PASSWORD: vulnshop_pass
+    ports:
+      - "${VULNSHOP_PORT:-4040}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/ | grep -qi 'VulnShop' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  vulnshop-db:
+    image: mariadb:10
+    container_name: vulnshop-db
+    hostname: vulnshop-db
+    environment:
+      MYSQL_ROOT_PASSWORD: vulnshop_root
+      MYSQL_DATABASE: vulnshop
+      MYSQL_USER: vulnshop_user
+      MYSQL_PASSWORD: vulnshop_pass
+    volumes:
+      - vulnshop_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  sonarqube_data:
+  sonarqube_logs:
+  sonarqube_extensions:
+  sonar_db:
+  zap_data:
+  nessus_data:
+  dvwa_db:
+  vulnshop_db:
