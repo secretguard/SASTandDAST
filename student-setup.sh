@@ -173,7 +173,13 @@ if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
     sed -i "s/^NESSUS_ACTIVATION_CODE=.*/NESSUS_ACTIVATION_CODE=$NESSUS_CODE/" "$SCRIPT_DIR/.env"
     ok "Nessus activation code saved."
   else
-    warn "Nessus activation code not set. Complete activation in the browser after setup."
+    warn "Nessus activation code skipped."
+    warn "Nessus will start as an UNREGISTERED server."
+    warn "To activate it after setup:"
+    warn "  1. Open https://<YOUR-IP>:8834  →  log in with admin / admin123"
+    warn "  2. Click the gear icon (top-right) → Settings → Overview"
+    warn "  3. Enter your free activation code from tenable.com/products/nessus/nessus-essentials"
+    warn "  4. Wait 15-30 min for plugin download to complete"
   fi
 else
   ok ".env already exists — skipping creation."

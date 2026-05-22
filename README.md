@@ -88,9 +88,12 @@ docker compose down -v && docker compose up -d
 
 ### Nessus
 1. Open `https://<YOUR-IP>:8834` and accept the self-signed certificate
-2. Select **Nessus Essentials**
-3. Get a free activation code from [tenable.com/products/nessus/nessus-essentials](https://www.tenable.com/products/nessus/nessus-essentials)
-4. Create an admin account and wait for plugin download (~15–30 min)
+2. Log in with `admin` / `admin123`
+3. If you skipped the activation code during setup, Nessus starts as an **unregistered server** — activate it as follows:
+   - Click the **gear icon** (top-right) → **Settings** → **Overview**
+   - Enter your free activation code in the **Activation Code** field
+   - Get a free code from [tenable.com/products/nessus/nessus-essentials](https://www.tenable.com/products/nessus/nessus-essentials) — they email it instantly
+4. Wait **15–30 min** for plugin download to complete (progress bar shown on dashboard)
 
 ### DVWA
 - Navigate to `http://<YOUR-IP>:8888/dvwa/` — the database is set up automatically
