@@ -3,7 +3,8 @@
 # SASTandDAST Lab — Student Setup (Docker Edition)
 # Author: Sarath G | www.sarathg.me
 #
-# Usage:  sudo bash student-setup.sh
+# Usage:  sudo bash student-setup.sh   ← as a regular user via sudo
+#         bash student-setup.sh        ← when already logged in as root
 #
 # What this does:
 #   1. Installs Docker + Docker Compose (if not present)
@@ -31,20 +32,28 @@ echo -e "${BOLD}╚════════════════════�
 echo ""
 
 # ── Root check ────────────────────────────────────────────────────────────────
-[[ "$EUID" -ne 0 ]] && abort "Run with sudo: sudo bash student-setup.sh"
+[[ "$EUID" -ne 0 ]] && abort "Run with sudo: sudo bash student-setup.sh  (or as root directly)"
 
-# ── Detect real user (not root) ───────────────────────────────────────────────
-LAB_USER="${SUDO_USER:-${USER:-$(logname 2>/dev/null || echo "")}}"
+# ── Detect operator identity ──────────────────────────────────────────────────
+# Three cases:
+#   a) sudo bash student-setup.sh  → SUDO_USER is the real user
+#   b) su -; bash student-setup.sh → SUDO_USER is empty, we are root directly
+#   c) already logged in as root   → same as (b)
+LAB_USER="${SUDO_USER:-}"
 if [[ -z "$LAB_USER" || "$LAB_USER" = "root" ]]; then
-  read -r -p "Enter your username (not root): " LAB_USER
+  # Running directly as root — no non-root user in context
+  LAB_USER="root"
+  LAB_HOME="/root"
+  RUNNING_AS_ROOT_DIRECTLY=true
+else
+  RUNNING_AS_ROOT_DIRECTLY=false
+  LAB_HOME=$(getent passwd "$LAB_USER" 2>/dev/null | cut -d: -f6)
+  [[ -z "$LAB_HOME" ]] && LAB_HOME="/home/$LAB_USER"
 fi
-[[ -z "$LAB_USER" || "$LAB_USER" = "root" ]] && abort "A non-root username is required."
-LAB_HOME=$(getent passwd "$LAB_USER" 2>/dev/null | cut -d: -f6)
-[[ -z "$LAB_HOME" ]] && LAB_HOME="/home/$LAB_USER"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ok "User: $LAB_USER  (home: $LAB_HOME)"
+ok "Operator: $LAB_USER  (home: $LAB_HOME)"
 
 # ── OS check ─────────────────────────────────────────────────────────────────
 if ! grep -qiE 'ubuntu|debian' /etc/os-release 2>/dev/null; then
@@ -91,7 +100,8 @@ fi
 ok "Docker Compose: $(docker compose version --short)"
 
 # Add lab user to docker group so they can run docker without sudo after re-login
-if ! id -nG "$LAB_USER" | grep -qw docker; then
+# (Skipped for root — root already has unrestricted access)
+if [[ "$RUNNING_AS_ROOT_DIRECTLY" = false ]] && ! id -nG "$LAB_USER" | grep -qw docker; then
   usermod -aG docker "$LAB_USER"
   warn "User $LAB_USER added to 'docker' group. Log out and back in to use docker without sudo."
 fi
@@ -145,7 +155,11 @@ echo "  SonarQube image alone is ~600 MB. Please be patient."
 echo ""
 
 cd "$SCRIPT_DIR"
-sudo -u "$LAB_USER" docker compose up -d --build
+if [[ "$RUNNING_AS_ROOT_DIRECTLY" = true ]]; then
+  docker compose up -d --build
+else
+  sudo -u "$LAB_USER" docker compose up -d --build
+fi
 
 # ── Wait briefly then show container status ───────────────────────────────────
 echo ""
@@ -168,7 +182,7 @@ echo -e "  SonarQube        http://$THIS_IP:9000            admin / admin"
 echo -e "  ZAP API          http://$THIS_IP:8090            key: lab-api-key-2024"
 echo -e "  Nessus           https://$THIS_IP:8834           setup in browser"
 echo -e "  DVWA             http://$THIS_IP:8888            admin / password"
-echo -e "  VulnShop         http://$THIS_IP:8080            admin@vulnshop.local / admin123"
+echo -e "  VulnShop         http://$THIS_IP:4040            admin@vulnshop.local / admin123"
 echo ""
 echo -e "  ${YELLOW}NOTE:${NC} SonarQube takes 2-3 min to fully start. Refresh if you see 503."
 echo -e "  ${YELLOW}NOTE:${NC} VulnShop builds its image on first run — may take 3-5 min."
