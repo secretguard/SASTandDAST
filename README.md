@@ -17,6 +17,44 @@ First run downloads ~2 GB of images and builds VulnShop — allow 5–10 minutes
 
 ---
 
+## Day-to-Day Usage
+
+| Action | Command |
+|--------|---------|
+| Start lab | `docker compose up -d` |
+| Stop lab | `docker compose down` |
+| Check health | `bash healthcheck.sh` |
+| Full reset (deletes all data) | `docker compose down -v && docker compose up -d` |
+
+```bash
+# Start everything
+docker compose up -d
+
+# Stop everything (data is preserved in Docker volumes)
+docker compose down
+
+# Start or stop a single service
+docker compose up -d sonarqube
+docker compose stop sonarqube
+
+# Restart a single service
+docker compose restart sonarqube
+
+# View live logs for a service
+docker compose logs -f vulnshop
+
+# Check health of all services
+bash healthcheck.sh
+
+# Full reset — wipes all data and starts fresh
+docker compose down -v && docker compose up -d
+```
+
+> **Note:** Data (SonarQube projects, scan results, DVWA state) persists across start/stop cycles.
+> Only `docker compose down -v` (the `-v` flag) deletes volumes and resets everything to a clean state.
+
+---
+
 ## Requirements
 
 | Item | Minimum |
