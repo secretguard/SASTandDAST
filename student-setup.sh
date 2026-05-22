@@ -8,10 +8,11 @@
 #
 # What this does:
 #   1. Installs Docker + Docker Compose (if not present)
-#   2. Sets vm.max_map_count for SonarQube / Elasticsearch
-#   3. Creates .env from .env.example (asks for Nessus activation code)
-#   4. Runs `docker compose up -d --build`
-#   5. Prints access URLs
+#   2. Installs ZAP GUI (zaproxy) via apt or snap
+#   3. Sets vm.max_map_count for SonarQube / Elasticsearch
+#   4. Creates .env from .env.example (asks for Nessus activation code)
+#   5. Runs `docker compose up -d --build`
+#   6. Runs healthcheck --fix to verify and auto-recover any failing containers
 ###############################################################################
 
 set -uo pipefail
@@ -107,9 +108,42 @@ if [[ "$RUNNING_AS_ROOT_DIRECTLY" = false ]] && ! id -nG "$LAB_USER" | grep -qw 
 fi
 
 ###############################################################################
-# STEP 2 — Kernel tuning (SonarQube / Elasticsearch requirement)
+# STEP 2 — ZAP GUI (zaproxy desktop application)
 ###############################################################################
-step "2/4" "Kernel parameters"
+step "2/5" "ZAP GUI"
+
+install_zap_gui() {
+  # Try apt first (works on Kali Linux and Debian-based distros with zaproxy in repos)
+  if apt-get install -y -qq zaproxy 2>/dev/null; then
+    ok "ZAP GUI installed via apt: $(zaproxy --version 2>/dev/null | head -1 || echo 'zaproxy')"
+    return 0
+  fi
+
+  # Fall back to snap
+  if command -v snap &>/dev/null; then
+    echo "  apt install failed — trying snap..."
+    if snap install zaproxy --classic 2>/dev/null; then
+      ok "ZAP GUI installed via snap"
+      return 0
+    fi
+  fi
+
+  warn "Could not install ZAP GUI automatically."
+  warn "Download manually from: https://www.zaproxy.org/download/"
+  warn "(The ZAP daemon for API scanning is still available via Docker on port 8090)"
+  return 1
+}
+
+if command -v zaproxy &>/dev/null; then
+  ok "ZAP GUI already installed: $(zaproxy --version 2>/dev/null | head -1 || echo 'zaproxy')"
+else
+  install_zap_gui
+fi
+
+###############################################################################
+# STEP 3 — Kernel tuning (SonarQube / Elasticsearch requirement)
+###############################################################################
+step "3/5" "Kernel parameters"
 
 CURRENT_MAP=$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)
 if [[ "$CURRENT_MAP" -lt 524288 ]]; then
@@ -122,9 +156,9 @@ else
 fi
 
 ###############################################################################
-# STEP 3 — Environment file
+# STEP 4 — Environment file
 ###############################################################################
-step "3/4" "Configuration"
+step "4/5" "Configuration"
 
 if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
   cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
@@ -146,9 +180,9 @@ else
 fi
 
 ###############################################################################
-# STEP 4 — Launch containers
+# STEP 5 — Launch containers
 ###############################################################################
-step "4/4" "Starting lab containers"
+step "5/5" "Starting lab containers"
 echo ""
 echo "  This downloads ~2 GB of Docker images on first run."
 echo "  SonarQube image alone is ~600 MB. Please be patient."
@@ -161,34 +195,15 @@ else
   sudo -u "$LAB_USER" docker compose up -d --build
 fi
 
-# ── Wait briefly then show container status ───────────────────────────────────
+# ── Give containers a moment to register before the health check ──────────────
 echo ""
-echo "  Waiting for services to initialise (15s)..."
-sleep 15
+echo "  Waiting 20s for containers to initialise before health check..."
+sleep 20
 
+###############################################################################
+# STEP 6 — Health check (auto-fix any failing containers)
+###############################################################################
 echo ""
-docker compose ps
-
-THIS_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-
+echo -e "${BOLD}${BLUE}[6/6]${NC} Health check"
 echo ""
-echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║     Lab Setup Complete!                                     ║${NC}"
-echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "  ${BOLD}Service          URL                              Credentials${NC}"
-echo    "  ─────────────────────────────────────────────────────────────────────"
-echo -e "  SonarQube        http://$THIS_IP:9000            admin / admin"
-echo -e "  ZAP API          http://$THIS_IP:8090            key: lab-api-key-2024"
-echo -e "  Nessus           https://$THIS_IP:8834           setup in browser"
-echo -e "  DVWA             http://$THIS_IP:8888            admin / password"
-echo -e "  VulnShop         http://$THIS_IP:4040            admin@vulnshop.local / admin123"
-echo ""
-echo -e "  ${YELLOW}NOTE:${NC} SonarQube takes 2-3 min to fully start. Refresh if you see 503."
-echo -e "  ${YELLOW}NOTE:${NC} VulnShop builds its image on first run — may take 3-5 min."
-echo ""
-echo -e "  Verify all services:  ${BOLD}sudo bash healthcheck.sh${NC}"
-echo -e "  View logs:            ${BOLD}docker compose logs -f <service>${NC}"
-echo -e "  Stop everything:      ${BOLD}docker compose down${NC}"
-echo -e "  Reset a service:      ${BOLD}docker compose restart <service>${NC}"
-echo ""
+bash "$SCRIPT_DIR/healthcheck.sh" --fix

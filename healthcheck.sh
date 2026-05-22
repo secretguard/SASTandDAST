@@ -186,9 +186,9 @@ check_container "dvwa" \
   "http://$THIS_IP:8888/dvwa/"
 check_container "vulnshop-db" "" "" ""
 check_container "vulnshop" \
-  "http://localhost:8080" \
+  "http://localhost:4040" \
   "VulnShop" \
-  "http://$THIS_IP:8080"
+  "http://$THIS_IP:4040"
 
 section "KERNEL"
 cur_map=$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)
@@ -213,7 +213,7 @@ if [[ "$FAIL_COUNT" -eq 0 && "$WARN_COUNT" -eq 0 ]]; then
   echo -e "  ZAP API:    http://$THIS_IP:8090           key: lab-api-key-2024"
   echo -e "  Nessus:     https://$THIS_IP:8834"
   echo -e "  DVWA:       http://$THIS_IP:8888/dvwa/     admin / password"
-  echo -e "  VulnShop:   http://$THIS_IP:8080           admin@vulnshop.local / admin123"
+  echo -e "  VulnShop:   http://$THIS_IP:4040           admin@vulnshop.local / admin123"
 elif [[ "$FAIL_COUNT" -gt 0 ]]; then
   echo -e "${YELLOW}${BOLD}Some containers need attention.${NC}"
   echo ""
