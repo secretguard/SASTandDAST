@@ -74,7 +74,7 @@ docker compose down -v && docker compose up -d
 | SonarQube (SAST) | `http://localhost:9000` | `admin` / `admin` |
 | OWASP ZAP API | `http://localhost:8090` or search for `zaproxy` in apps or in CLI | API key: `lab-api-key-2024` |
 | Nessus | `https://localhost:8834` | Setup in browser (If login is asked enter `admin` / `admin123`) |
-| DVWA | `http://localhost:8888/dvwa/` | `admin` / `password` |
+| DVWA | `http://localhost:8888` | `admin` / `password` |
 | VulnShop | `http://localhost:4040` | `admin@vulnshop.local` / `admin123` |
 
 ---
@@ -87,7 +87,7 @@ docker compose down -v && docker compose up -d
 3. To scan a project: `docker compose run --rm sonar-scanner`
 
 ### Nessus
-1. Open `https://<YOUR-IP>:8834` and accept the self-signed certificate
+1. Open `https://localhost:8834` and accept the self-signed certificate
 2. Log in with `admin` / `admin123`
 3. If you skipped the activation code during setup, Nessus starts as an **unregistered server** — activate it as follows:
    - Click the **gear icon** (top-right) → **Settings** → **Overview**
@@ -96,11 +96,11 @@ docker compose down -v && docker compose up -d
 4. Wait **15–30 min** for plugin download to complete (progress bar shown on dashboard)
 
 ### DVWA
-- Navigate to `http://<YOUR-IP>:8888/dvwa/` — the database is set up automatically
+- Navigate to `http://localhost:8888` — the database is set up automatically
 - Login: `admin` / `password`
 
 ### VulnShop
-- Navigate to `http://<YOUR-IP>:4040` — the database is migrated and seeded automatically
+- Navigate to `http://localhost:4040` — the database is migrated and seeded automatically
 - Login: `admin@vulnshop.local` / `admin123`
 
 ---
