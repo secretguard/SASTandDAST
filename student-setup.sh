@@ -83,8 +83,8 @@ install_docker() {
     https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
     > /etc/apt/sources.list.d/docker.list
 
-  apt-get update -qq
-  apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose
+  apt update -qq
+  apt install -y -qq docker.io docker-compose
   systemctl enable --now docker
   ok "Docker installed: $(docker --version)"
 }
