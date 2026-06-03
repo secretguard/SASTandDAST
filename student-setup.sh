@@ -84,7 +84,7 @@ install_docker() {
     > /etc/apt/sources.list.d/docker.list
 
   apt-get update -qq
-  apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose
   systemctl enable --now docker
   ok "Docker installed: $(docker --version)"
 }
@@ -96,7 +96,7 @@ else
 fi
 
 if ! docker compose version &>/dev/null; then
-  abort "docker compose not available. Ensure docker-compose-plugin is installed."
+  abort "docker compose not available. Ensure docker-compose is installed. Run 'sudo apt update && apt install docker-compose'"
 fi
 ok "Docker Compose: $(docker compose version --short)"
 
