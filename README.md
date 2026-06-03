@@ -71,11 +71,11 @@ docker compose down -v && docker compose up -d
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| SonarQube (SAST) | `http://<YOUR-IP>:9000` | `admin` / `admin` |
-| OWASP ZAP API | `http://<YOUR-IP>:8090` | API key: `lab-api-key-2024` |
-| Nessus | `https://<YOUR-IP>:8834` | Setup in browser |
-| DVWA | `http://<YOUR-IP>:8888/dvwa/` | `admin` / `password` |
-| VulnShop | `http://<YOUR-IP>:4040` | `admin@vulnshop.local` / `admin123` |
+| SonarQube (SAST) | `http://localhost:9000` | `admin` / `admin` |
+| OWASP ZAP API | `http://localhost:8090` or search for zaproxy in apps or in CLI | API key: `lab-api-key-2024` |
+| Nessus | `https://localhost:8834` | Setup in browser (If login is asked enter admin/admin |
+| DVWA | `http://localhost:8888/dvwa/` | `admin` / `password` |
+| VulnShop | `http://localhost:4040` | `admin@vulnshop.local` / `admin123` |
 
 ---
 
