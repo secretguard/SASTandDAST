@@ -25,7 +25,7 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 # This layer is cached as long as the Laravel version doesn't change.
 RUN composer config --global audit.block-insecure false && \
 COMPOSER_ALLOW_SUPERUSER=1 composer create-project \
-        laravel/laravel:10.* /app --no-interaction && \
+        laravel/laravel:10.* /app --no-interaction \
     && composer clear-cache
 
 WORKDIR /app
